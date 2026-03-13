@@ -181,7 +181,8 @@ def _run_subprocess(cmd: list, timeout: int, cwd: str, env: dict
 def _run_cli(binary: str, session_file: str, ctx_file: str,
              agent_name: str, prompt: str,
              file_path: str | None = None,
-             extra_flags: list | None = None) -> str:
+             extra_flags: list | None = None,
+             model_override: str | None = None) -> str:
     """
     Запускает CLI-агент (claude/gemini/qwen) с промптом, сессией и файлом.
     Для Claude добавляет --dangerously-skip-permissions.
@@ -223,7 +224,7 @@ def _run_cli(binary: str, session_file: str, ctx_file: str,
 
     agent_key = ("claude" if "claude" in binary else
                  "gemini" if "gemini" in binary else "qwen")
-    model = get_model(agent_key)
+    effective_model = model_override if model_override is not None else get_model(agent_key)
 
     cmd = [binary]
     if is_claude:
@@ -231,8 +232,8 @@ def _run_cli(binary: str, session_file: str, ctx_file: str,
     cmd += ["--output-format", "json"]
     if not is_claude:
         cmd += ["--yolo"]
-    if model:
-        cmd += ["--model", model]
+    if effective_model:
+        cmd += ["--model", effective_model]
     if extra_flags:
         cmd += extra_flags
     sid = _load_session(session_file)
@@ -249,7 +250,7 @@ def _run_cli(binary: str, session_file: str, ctx_file: str,
 
     t_start = time.time()
     timeout_secs = _AGENT_TIMEOUT.get(agent_key, 300)
-    log_info(f"→ {agent_name} [{model}] prompt={len(full_prompt)}ch timeout={timeout_secs}s"
+    log_info(f"→ {agent_name} [{effective_model}] prompt={len(full_prompt)}ch timeout={timeout_secs}s"
              + (f" file={os.path.basename(file_path)}" if file_path else ""))
     log_debug(f"  prompt preview: {full_prompt[:200]!r}")
 
