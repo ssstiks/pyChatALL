@@ -32,6 +32,7 @@ from context import (
     memory_load,
 )
 from logger import log_debug, log_info, log_warn, log_error
+import router
 
 OR_MODELS_TTL = 3600
 _or_id_map: dict[str, str] = {}
@@ -449,8 +450,11 @@ def ask_claude(prompt: str, file_path: str | None = None) -> str:
     msg = claude_rate_msg()
     if msg:
         return msg
+    current_model = get_model("claude")
+    effective_model = router.classify(prompt, file_path, current_model)
     return _run_cli(bin_path, CLAUDE_SESSION, CLAUDE_CTX_FILE,
-                    "Claude", prompt, file_path)
+                    "Claude", prompt, file_path,
+                    model_override=effective_model)
 
 
 def ask_gemini(prompt: str, file_path: str | None = None) -> str:
