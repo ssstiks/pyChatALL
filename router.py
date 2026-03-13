@@ -61,51 +61,86 @@ def _rule_classify(prompt: str, file_path: str | None) -> str:
     return "ambiguous"
 
 
-def _run_subprocess_lazy(cmd, timeout, cwd, env):
-    """Запускает подпроцесс и возвращает (stdout, stderr, returncode, timed_out)."""
-    import subprocess
+def _run_subprocess_lazy(cmd: list, timeout: int, cwd: str, env: dict):
+    """
+    Ленивая обёртка над agents._run_subprocess.
+    Импортируется внутри функции, чтобы избежать кругового импорта:
+      agents.py → import router → router imports agents (ERROR).
+    После первой загрузки Python кеширует модуль — повторный вызов бесплатен.
+    """
+    from agents import _run_subprocess
+    return _run_subprocess(cmd, timeout, cwd, env)
+
+
+def _parse_classifier_response(response: str) -> str | None:
+    """
+    Парсит текстовый ответ классификатора.
+    Возвращает модель или None если ответ некорректный.
+    Безопасное правило: SIMPLE только если слово есть без COMPLEX.
+    """
+    result = response.strip().upper()
+    if not result:
+        return None
+    if "SIMPLE" in result and "COMPLEX" not in result:
+        return _HAIKU_MODEL
+    if "COMPLEX" in result:
+        return _SONNET_MODEL
+    return None
+
+
+def _classify_with_binary(binary: str, prompt: str) -> str | None:
+    """
+    Запускает один классификатор без --output-format json (возвращает plain text).
+    Возвращает модель или None при ошибке/таймауте.
+    """
+    if not os.path.isfile(binary):
+        return None
+    classifier_prompt = _CLASSIFIER_PROMPT.format(prompt=prompt[:500])
+    # Без --output-format json: получаем plain text для простого поиска SIMPLE/COMPLEX
+    cmd = [binary, "--yolo", "--print", "--prompt", classifier_prompt]
+    env = os.environ.copy()
+    for var in ("CLAUDECODE", "GEMINICODE", "QWENCODE"):
+        env.pop(var, None)
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=cwd,
-            env=env,
+        stdout, stderr, rc, timed_out = _run_subprocess_lazy(
+            cmd, timeout=8, cwd=WORK_DIR, env=env
         )
-        return (result.stdout.strip(), result.stderr.strip(), result.returncode, False)
-    except subprocess.TimeoutExpired:
-        return ("", "timeout", -1, True)
-    except Exception as exc:
-        return ("", str(exc), -1, False)
+        if timed_out or rc != 0:
+            return None
+        return _parse_classifier_response(stdout)
+    except Exception:
+        return None
 
 
 def _ai_classify(prompt: str) -> str:
-    """Использует Haiku для классификации сложности промпта.
-
-    Возвращает _HAIKU_MODEL если SIMPLE, иначе _SONNET_MODEL.
-    При любой ошибке возвращает _SONNET_MODEL (safe default).
     """
-    classifier_input = _CLASSIFIER_PROMPT.format(prompt=prompt[:500])
-    cmd = [
-        "/home/stx/.local/bin/claude",
-        "--model", _HAIKU_MODEL,
-        "--print",
-        classifier_input,
-    ]
-    env = {**os.environ}
-    stdout, stderr, returncode, timed_out = _run_subprocess_lazy(
-        cmd, timeout=15, cwd=WORK_DIR, env=env
-    )
-    if returncode != 0 or not stdout:
-        log_warn(f"[router] _ai_classify error: {stderr!r}")
+    Запускает Gemini и Qwen параллельно. Первый валидный ответ за 3с побеждает.
+    При неудаче обоих возвращает Sonnet (безопасный дефолт).
+    shutdown(cancel_futures=True) предотвращает блокировку после раннего возврата.
+    """
+    binaries = [GEMINI_BIN, QWEN_BIN]
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    futures = {
+        executor.submit(_classify_with_binary, binary, prompt): binary
+        for binary in binaries
+    }
+    result = None
+    try:
+        for future in concurrent.futures.as_completed(futures, timeout=3):
+            res = future.result()
+            if res is not None:
+                log_info(f"Router: AI classifier → {res} (binary={futures[future]})")
+                result = res
+                break
+    except concurrent.futures.TimeoutError:
+        log_warn("Router: AI classifier timed out (3s) — defaulting to Sonnet")
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+    if result is None:
+        log_warn("Router: both classifiers failed — defaulting to Sonnet")
         return _SONNET_MODEL
-    answer = stdout.strip().upper()
-    if answer == "SIMPLE":
-        log_info(f"[router] AI → SIMPLE → haiku")
-        return _HAIKU_MODEL
-    log_info(f"[router] AI → {answer!r} → sonnet")
-    return _SONNET_MODEL
+    return result
 
 
 def classify(prompt: str, file_path: str | None, current_model: str) -> str:
