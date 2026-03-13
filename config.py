@@ -123,6 +123,9 @@ DEFAULT_MODELS = {
     "qwen":   "vision-model",
 }
 
+# Named constant — immune to KNOWN_MODELS list reordering
+SONNET_MODEL = KNOWN_MODELS["claude"][0]   # "claude-sonnet-4-6"
+
 # ── CLI-команды каждого агента ────────────────────────────────
 AGENT_CLI_CMDS = {
     "claude": [
