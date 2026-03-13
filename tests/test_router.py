@@ -83,22 +83,26 @@ def _fake_subprocess_ambiguous(cmd, timeout, cwd, env):
 
 
 def test_ai_classify_simple_response_returns_haiku():
-    with patch("router._run_subprocess_lazy", side_effect=_fake_subprocess_simple):
+    with patch("os.path.isfile", return_value=True), \
+         patch("router._run_subprocess_lazy", side_effect=_fake_subprocess_simple):
         result = _ai_classify("medium length prompt here about basic concepts")
     assert result == _HAIKU_MODEL
 
 def test_ai_classify_complex_response_returns_sonnet():
-    with patch("router._run_subprocess_lazy", side_effect=_fake_subprocess_complex):
+    with patch("os.path.isfile", return_value=True), \
+         patch("router._run_subprocess_lazy", side_effect=_fake_subprocess_complex):
         result = _ai_classify("medium length prompt here about basic concepts")
     assert result == _SONNET_MODEL
 
 def test_ai_classify_ambiguous_response_returns_sonnet():
-    with patch("router._run_subprocess_lazy", side_effect=_fake_subprocess_ambiguous):
+    with patch("os.path.isfile", return_value=True), \
+         patch("router._run_subprocess_lazy", side_effect=_fake_subprocess_ambiguous):
         result = _ai_classify("medium length prompt here about basic concepts")
     assert result == _SONNET_MODEL
 
 def test_ai_classify_error_returns_sonnet():
-    with patch("router._run_subprocess_lazy", side_effect=_fake_subprocess_error):
+    with patch("os.path.isfile", return_value=True), \
+         patch("router._run_subprocess_lazy", side_effect=_fake_subprocess_error):
         result = _ai_classify("medium length prompt here about basic concepts")
     assert result == _SONNET_MODEL
 

@@ -103,7 +103,7 @@ def _classify_with_binary(binary: str, prompt: str) -> str | None:
         env.pop(var, None)
     try:
         stdout, stderr, rc, timed_out = _run_subprocess_lazy(
-            cmd, timeout=8, cwd=WORK_DIR, env=env
+            cmd, timeout=2, cwd=WORK_DIR, env=env
         )
         if timed_out or rc != 0:
             return None
@@ -156,12 +156,12 @@ def classify(prompt: str, file_path: str | None, current_model: str) -> str:
     decision = _rule_classify(prompt, file_path)
 
     if decision == "sonnet":
-        log_info(f"[router] rule → sonnet")
+        log_info("[router] rule → sonnet")
         return _SONNET_MODEL
     if decision == "haiku":
-        log_info(f"[router] rule → haiku")
+        log_info("[router] rule → haiku")
         return _HAIKU_MODEL
 
     # ambiguous — спрашиваем AI
-    log_info(f"[router] rule → ambiguous, calling AI classifier")
+    log_info("[router] rule → ambiguous, calling AI classifier")
     return _ai_classify(prompt)
