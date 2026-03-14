@@ -774,8 +774,20 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
     lbl = agent_label(agent)
     timeout_secs = _AGENT_TIMEOUT.get(agent, 300)
     timeout_mins = timeout_secs // 60
-    ph = tg_send(f"⏳ {lbl} думает... (макс {timeout_mins} мин)")
+    cancel_markup = kb([[("🛑 Отмена", "cancel_current")]])
+    ph = tg_send(f"⏳ {lbl} думает... (макс {timeout_mins} мин)", cancel_markup)
     ph_id = ph["message_id"] if ph else None
+
+    # Commit point: cancel may have fired between dequeue and placeholder send.
+    # Edit the new placeholder and return if cancel is set.
+    # The cancel handler may concurrently edit the same placeholder — this is a
+    # benign double-edit: tg_edit handles 400 "message not modified" gracefully.
+    if _cancel_event.is_set():
+        if ph_id:
+            tg_edit(ph_id, "❌ Запрос отменён")
+        _cancel_event.clear()
+        return
+    _cancel_event.clear()  # Committed to this request — clear any stale cancel state
 
     result_box: list[str] = []
 
@@ -788,14 +800,18 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
 
     while t.is_alive():
         time.sleep(5)
+        if _cancel_event.is_set():
+            break
         if not t.is_alive():
             break
         elapsed = int(time.time() - t_start)
         if ph_id:
-            tg_edit(ph_id, f"⏳ {lbl} думает... {elapsed}с / {timeout_secs}с")
+            tg_edit(ph_id, f"⏳ {lbl} думает... {elapsed}с / {timeout_secs}с", cancel_markup)
         tg_typing()
 
     t.join()
+    if _cancel_event.is_set():
+        return  # Cancel handler already edited placeholder to "❌ Запрос отменён"
     reply = result_box[0] if result_box else "❌ Нет ответа"
 
     shared_ctx_add("assistant", reply, AGENT_NAMES[agent])
