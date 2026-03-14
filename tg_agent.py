@@ -1164,11 +1164,11 @@ def process_update(upd: dict) -> None:
     if not prompt_text and not file_path:
         return
 
-    threading.Thread(
-        target=route_and_reply,
-        args=(prompt_text or "", file_path),
-        daemon=True,
-    ).start()
+    qsize_before = _request_queue.qsize()
+    _request_queue.put((prompt_text or "", file_path))
+    if _worker_busy.is_set() or qsize_before > 0:
+        pos = qsize_before + 1
+        tg_send(f"📋 В очереди (позиция {pos})")
 
 
 # ── MAIN ─────────────────────────────────────────────────────
