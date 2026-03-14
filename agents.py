@@ -288,6 +288,12 @@ def _run_cli(binary: str, session_file: str, ctx_file: str,
 
     try:
         stdout, stderr, rc, timed_out = _run_subprocess(cmd, timeout_secs, WORK_DIR, env)
+
+        if _is_transient_error(stdout, stderr, rc, timed_out):
+            log_warn(f"{agent_name}: transient error (rc={rc}), retrying in 2s…")
+            time.sleep(2)
+            stdout, stderr, rc, timed_out = _run_subprocess(cmd, timeout_secs, WORK_DIR, env)
+
         elapsed = time.time() - t_start
 
         if timed_out:
