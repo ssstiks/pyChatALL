@@ -25,9 +25,9 @@ import atexit
 import glob as glob_mod
 import json
 import os
+import queue
 import subprocess
 import threading
-import queue
 import time
 
 import requests
