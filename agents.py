@@ -178,6 +178,37 @@ def _run_subprocess(cmd: list, timeout: int, cwd: str, env: dict
         return "", "", -1, True
 
 
+_NON_RETRYABLE_MARKERS = (
+    "403", "forbidden", "request not allowed",       # auth / permission
+    "429", "rate limit", "quota exceeded", "too many requests",  # rate limit
+)
+
+_TRANSIENT_PATTERNS = (
+    "500", "502", "503", "504",
+    "overloaded", "temporarily unavailable",
+    "service unavailable", "internal server error",
+)
+
+
+def _is_transient_error(stdout: str, stderr: str, rc: int, timed_out: bool) -> bool:
+    """Returns True if the subprocess failure is transient and worth retrying once.
+
+    Non-retryable check runs first: any auth or rate-limit marker → False.
+    Then: 5xx pattern in combined output → True.
+    Then: empty stdout (subprocess crash with no output) → True.
+    rc=0 and timed_out=True are always False.
+    """
+    if timed_out or rc == 0:
+        return False
+    combined = (stdout + stderr).lower()
+    if any(m in combined for m in _NON_RETRYABLE_MARKERS):
+        return False
+    if any(p in combined for p in _TRANSIENT_PATTERNS):
+        return True
+    if not stdout.strip():
+        return True
+    return False
+
 # ── УНИВЕРСАЛЬНЫЙ ВЫЗОВ CLI ──────────────────────────────────
 def _run_cli(binary: str, session_file: str, ctx_file: str,
              agent_name: str, prompt: str,
