@@ -58,9 +58,10 @@ def _queue_worker() -> None:
         except queue.Empty:
             continue
         try:
-            # Discard items dequeued during a cancel window.
-            # Do NOT clear the event here — route_and_reply clears it after
-            # the placeholder is sent (the safest point to commit).
+            # Discard items dequeued during a cancel window (cancel fired while
+            # worker was blocked in get()). Clear event only on the discard path.
+            # On the non-cancel path, route_and_reply clears the event after the
+            # placeholder is sent (the commit point).
             if _cancel_event.is_set():
                 _cancel_event.clear()
                 continue
@@ -104,14 +105,17 @@ cancel_markup = kb([[("🛑 Отмена", "cancel_current")]])
 ph = tg_send(f"⏳ {lbl} думает... (макс {timeout_mins} мин)", cancel_markup)
 ph_id = ph["message_id"] if ph else None
 
-# Cancel may have fired between dequeue and here. Now that the placeholder
-# is sent we can check once more and clear the event safely.
+# Cancel may have fired between dequeue and placeholder send.
+# Edit the NEW placeholder and return. The cancel handler may concurrently
+# edit the same placeholder — this produces a benign double-edit (Telegram
+# returns 400 "message not modified" for the second call); tg_edit already
+# handles 400 errors gracefully by logging them.
 if _cancel_event.is_set():
     if ph_id:
         tg_edit(ph_id, "❌ Запрос отменён")
     _cancel_event.clear()
     return
-_cancel_event.clear()  # Committed — clear any stale cancel state
+_cancel_event.clear()  # Committed to this request — clear any stale cancel state
 ```
 
 **2. Check `_cancel_event` in the while loop:**
@@ -256,7 +260,7 @@ Cancel button pressed
 | Cancel before subprocess starts | `_active_proc` is None → `cancel_active_proc()` is a no-op. The subprocess starts, runs to completion (up to the full agent timeout), and its output is discarded by the post-join check. Known limitation: subprocess consumes resources until timeout. |
 | Cancel after subprocess finishes but before reply sent | `_cancel_event` set → `route_and_reply` returns silently after join; handler already edited placeholder |
 | Cancel with empty queue | Draining empty queue is a no-op |
-| Two cancel presses | Second press: `_active_proc` is None (already cleared), queue empty, event already set → harmless no-op |
+| Two cancel presses | Second press: `_active_proc` is None, queue empty → no-op. Known limitation: if first discard-cycle clears the event before the second cancel sets it, a legitimate message arriving next may be dequeued and discarded by the worker's event check. This is an accepted edge case. |
 | Item dequeued by worker mid-cancel | Worker checks `_cancel_event` after dequeue; if set, discards item and clears event |
 | Queue position shown is off by one | Race between `qsize_before` capture and worker dequeue is accepted; position is advisory |
 
