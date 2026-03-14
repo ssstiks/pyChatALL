@@ -857,7 +857,21 @@ def handle_callback(cb: dict) -> None:
     cb_id = cb["id"]
     msg_id = cb.get("message", {}).get("message_id")
 
-    if data == "retry_last":
+    if data == "cancel_current":
+        tg_answer_cb(cb_id, "❌ Отменяю...")
+        cancel_active_proc()
+        _cancel_event.set()
+        while not _request_queue.empty():
+            try:
+                _request_queue.get_nowait()
+                _request_queue.task_done()
+            except queue.Empty:
+                break
+        if msg_id:
+            tg_edit(msg_id, "❌ Запрос отменён")
+        return
+
+    elif data == "retry_last":
         tg_answer_cb(cb_id, "🔄 Повторяю запрос...")
         req = _last_request.copy()
         if req.get("prompt"):
