@@ -26,8 +26,8 @@ import glob as glob_mod
 import json
 import os
 import subprocess
-import queue
 import threading
+import queue
 import time
 
 import requests
