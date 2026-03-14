@@ -4,6 +4,8 @@
 **Status:** Approved
 **Scope:** Task queue (serialize concurrent requests) + cancel button (kill active request + drain queue). Heartbeat and typing indicator are already implemented; this spec does not change them.
 
+> **Single-user bot assumption:** Cancel is global — any cancel press affects the currently active request regardless of who sent it. This is acceptable for a single-user bot.
+
 ---
 
 ## Problem
@@ -30,6 +32,7 @@ The bot currently spawns a daemon thread per incoming message, so two messages s
 - Per-agent queues or priorities.
 - Queue persistence across restarts.
 - "Cancel and keep queue" (cancel always clears the full queue per user decision).
+- Making `/retry` queue-aware (it bypasses the queue intentionally; concurrent subprocess risk is accepted).
 
 ---
 
@@ -54,14 +57,29 @@ def _queue_worker() -> None:
             item = _request_queue.get(timeout=1)
         except queue.Empty:
             continue
-        _cancel_event.clear()
-        _worker_busy.set()
-        text, file_path = item
         try:
-            route_and_reply(text, file_path)
+            # Discard items dequeued during a cancel window.
+            # Do NOT clear the event here — route_and_reply clears it after
+            # the placeholder is sent (the safest point to commit).
+            if _cancel_event.is_set():
+                _cancel_event.clear()
+                continue
+            _worker_busy.set()
+            text, file_path = item
+            try:
+                route_and_reply(text, file_path)
+            finally:
+                _worker_busy.clear()
         finally:
-            _worker_busy.clear()
             _request_queue.task_done()
+```
+
+### Start worker thread in `main()`
+
+Add before the polling loop:
+
+```python
+threading.Thread(target=_queue_worker, daemon=True, name="queue-worker").start()
 ```
 
 ### Changes to `process_update` in `tg_agent.py`
@@ -69,18 +87,31 @@ def _queue_worker() -> None:
 Replace `threading.Thread(target=route_and_reply, ...).start()` with:
 
 ```python
+qsize_before = _request_queue.qsize()
 _request_queue.put((prompt_text or "", file_path))
-if _worker_busy.is_set() or _request_queue.qsize() > 1:
-    pos = _request_queue.qsize()
+if _worker_busy.is_set() or qsize_before > 0:
+    pos = qsize_before + 1
     tg_send(f"📋 В очереди (позиция {pos})")
 ```
 
+`qsize_before` is captured before `put()` to get a stable count. The position shown may be off by one in rare races (worker dequeues between capture and put), which is acceptable — the notification is advisory.
+
 ### Changes to `route_and_reply` in `tg_agent.py`
 
-**1. Add cancel button to placeholder:**
+**1. Add cancel button to placeholder; check cancel immediately after (commit point):**
 ```python
 cancel_markup = kb([[("🛑 Отмена", "cancel_current")]])
 ph = tg_send(f"⏳ {lbl} думает... (макс {timeout_mins} мин)", cancel_markup)
+ph_id = ph["message_id"] if ph else None
+
+# Cancel may have fired between dequeue and here. Now that the placeholder
+# is sent we can check once more and clear the event safely.
+if _cancel_event.is_set():
+    if ph_id:
+        tg_edit(ph_id, "❌ Запрос отменён")
+    _cancel_event.clear()
+    return
+_cancel_event.clear()  # Committed — clear any stale cancel state
 ```
 
 **2. Check `_cancel_event` in the while loop:**
@@ -97,17 +128,17 @@ while t.is_alive():
     tg_typing()
 ```
 
-**3. Check `_cancel_event` after `t.join()` and discard reply if set:**
+**3. Check `_cancel_event` after `t.join()` and discard reply silently (cancel handler already edited the placeholder):**
 ```python
 t.join()
 if _cancel_event.is_set():
-    if ph_id:
-        tg_edit(ph_id, "❌ Запрос отменён")
-    return
+    return  # Cancel handler already edited placeholder to "❌ Запрос отменён"
 reply = result_box[0] if result_box else "❌ Нет ответа"
 ```
 
 ### Cancel handler in `handle_callback` in `tg_agent.py`
+
+The cancel handler is the single point responsible for editing the placeholder to "❌". `route_and_reply` just returns silently after `t.join()` if the cancel event is set.
 
 ```python
 if data == "cancel_current":
@@ -124,6 +155,8 @@ if data == "cancel_current":
         tg_edit(msg_id, "❌ Запрос отменён")
     return
 ```
+
+This avoids the double-edit problem: only the cancel handler edits the placeholder to "❌"; `route_and_reply` does not edit it on the cancel path.
 
 ### Changes to `agents.py`
 
@@ -165,11 +198,15 @@ def _run_subprocess(cmd, timeout, cwd, env):
         _active_proc = None
 ```
 
-**3. Fix `_is_transient_error` guard:**
+**3. Fix `_is_transient_error` guard (Linux only):**
 
 Change `if timed_out or rc == 0:` to `if timed_out or rc <= 0:`.
 
-This prevents a SIGKILL'd process (returncode = -9 on Linux) from being incorrectly classified as a transient error and retried.
+On Linux, `proc.kill()` (SIGKILL) results in `returncode = -9`. The existing guard `rc == 0` would not catch this, allowing the killed subprocess to be incorrectly classified as a transient error and retried. The timeout path (`rc=-1, timed_out=True`) is already caught by the `timed_out` check and unaffected. This fix is Linux-specific; on Windows, killed subprocesses return a large positive exit code and would not be affected by this guard either way.
+
+**4. Note on `_active_proc` thread safety:**
+
+`_active_proc` is written by `_run_subprocess` (queue-worker thread) and read+written by `cancel_active_proc()` (callback-handler thread). Simple Python object assignments are atomic under the GIL, so no additional lock is required. This assumption holds for CPython and is acceptable for this use case.
 
 ---
 
@@ -181,29 +218,33 @@ User message
     ▼
 process_update()
     │
-    ├─ worker idle? ──yes──► queue.put() [picked up immediately, no notification]
+    ├─ worker idle, queue empty? ──► queue.put() [no notification — picked up immediately]
     │
-    └─ worker busy? ──yes──► queue.put() + tg_send("📋 В очереди (позиция N)")
+    └─ worker busy or queue non-empty? ──► queue.put() + tg_send("📋 В очереди (позиция N)")
 
 _queue_worker() [persistent daemon thread]
     │
-    └─ loop: queue.get() → clear cancel_event → set worker_busy
+    └─ loop: queue.get()
+           → if cancel_event set: clear + discard item + continue
+           → else: set worker_busy (do NOT clear event yet)
            → route_and_reply(text, file_path)
            → clear worker_busy
 
 route_and_reply()
     │
     ├─ send placeholder with 🛑 button
+    ├─ check cancel_event (commit point): if set → edit placeholder "❌" + clear + return
+    ├─ _cancel_event.clear()  ← cleared here, after commit
     ├─ spawn _worker thread → agent function → subprocess
     ├─ while loop: sleep(5) → check cancel_event → edit placeholder
-    └─ after join: check cancel_event → discard reply if set
+    └─ after join: if cancel_event set → return silently (handler already edited)
 
 Cancel button pressed
     │
     ├─ agents.cancel_active_proc() → SIGKILL subprocess
     ├─ _cancel_event.set()
     ├─ drain _request_queue
-    └─ edit placeholder → "❌ Запрос отменён"
+    └─ tg_edit(placeholder, "❌ Запрос отменён")  ← only edit on cancel path
 ```
 
 ---
@@ -212,11 +253,12 @@ Cancel button pressed
 
 | Scenario | Behaviour |
 |---|---|
-| Cancel before subprocess starts | `_active_proc` is None → no kill; `_cancel_event` set → while loop breaks, reply discarded |
-| Cancel after subprocess finishes but before reply sent | `_cancel_event` check after `t.join()` discards reply |
+| Cancel before subprocess starts | `_active_proc` is None → `cancel_active_proc()` is a no-op. The subprocess starts, runs to completion (up to the full agent timeout), and its output is discarded by the post-join check. Known limitation: subprocess consumes resources until timeout. |
+| Cancel after subprocess finishes but before reply sent | `_cancel_event` set → `route_and_reply` returns silently after join; handler already edited placeholder |
 | Cancel with empty queue | Draining empty queue is a no-op |
-| Two cancel presses | Second press: `_active_proc` is None (already killed), event already set → no-op |
-| Queue fills while cancelling | Queue is drained by cancel handler before new items can be processed |
+| Two cancel presses | Second press: `_active_proc` is None (already cleared), queue empty, event already set → harmless no-op |
+| Item dequeued by worker mid-cancel | Worker checks `_cancel_event` after dequeue; if set, discards item and clears event |
+| Queue position shown is off by one | Race between `qsize_before` capture and worker dequeue is accepted; position is advisory |
 
 ---
 
@@ -225,7 +267,7 @@ Cancel button pressed
 | File | Changes |
 |---|---|
 | `tg_agent.py` | Add `_request_queue`, `_cancel_event`, `_worker_busy`; add `_queue_worker()`; modify `process_update`, `route_and_reply`, `handle_callback`; start worker thread in `main()` |
-| `agents.py` | Add `_active_proc`, `cancel_active_proc()`; modify `_run_subprocess`; fix `_is_transient_error` guard |
+| `agents.py` | Add `_active_proc`, `cancel_active_proc()`; modify `_run_subprocess`; fix `_is_transient_error` guard (`rc <= 0`) |
 
 ---
 
