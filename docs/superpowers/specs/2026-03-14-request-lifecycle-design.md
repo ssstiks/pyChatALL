@@ -160,6 +160,8 @@ if data == "cancel_current":
     return
 ```
 
+**Safety note on `task_done()`:** The drain loop must never call `task_done()` for the item the worker already dequeued and currently holds. This is guaranteed automatically: `queue.get()` atomically removes an item before any `get_nowait()` can return the same item. The drain loop and the worker cannot hold the same item simultaneously.
+
 This avoids the double-edit problem: only the cancel handler edits the placeholder to "❌"; `route_and_reply` does not edit it on the cancel path.
 
 ### Changes to `agents.py`
