@@ -215,7 +215,7 @@ def _is_transient_error(stdout: str, stderr: str, rc: int, timed_out: bool) -> b
     Non-retryable check runs first: any auth or rate-limit marker → False.
     Then: 5xx pattern in combined output → True.
     Then: empty stdout (subprocess crash with no output) → True.
-    rc=0 and timed_out=True are always False.
+    rc <= 0 or timed_out=True are always False.
     """
     if timed_out or rc <= 0:
         return False
