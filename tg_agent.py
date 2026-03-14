@@ -26,6 +26,7 @@ import glob as glob_mod
 import json
 import os
 import subprocess
+import queue
 import threading
 import time
 
@@ -85,6 +86,10 @@ from ui import (
 )
 
 import team_mode
+
+_request_queue: "queue.Queue[tuple[str, str | None]]" = queue.Queue()
+_cancel_event = threading.Event()
+_worker_busy = threading.Event()
 
 # Mutable _last_request (из config — изменяем здесь)
 _last_request: dict = {}
@@ -423,6 +428,32 @@ def send_to_agent(agent: str, prompt: str, file_path: str | None = None) -> None
     else:
         tg_send(f"[{lbl}]")
         tg_send(reply, file_markup)
+
+
+# ── ОЧЕРЕДЬ ЗАПРОСОВ ──────────────────────────────────────────
+def _queue_worker() -> None:
+    """Persistent daemon thread. Processes one request at a time."""
+    while True:
+        try:
+            item = _request_queue.get(timeout=1)
+        except queue.Empty:
+            continue
+        try:
+            # Discard items dequeued during a cancel window.
+            # _cancel_event is cleared HERE on the discard path only.
+            # On the non-cancel path, route_and_reply clears it at the
+            # commit point (after placeholder is sent).
+            if _cancel_event.is_set():
+                _cancel_event.clear()
+                continue
+            _worker_busy.set()
+            text, file_path = item
+            try:
+                route_and_reply(text, file_path)
+            finally:
+                _worker_busy.clear()
+        finally:
+            _request_queue.task_done()
 
 
 # ── РОУТЕР ────────────────────────────────────────────────────
@@ -1154,6 +1185,7 @@ def main() -> None:
     tg_send("🤖 Мультиагент запущен! Используй /menu для управления.")
     tg_set_keyboard()
     threading.Thread(target=run_startup_check, daemon=True).start()
+    threading.Thread(target=_queue_worker, daemon=True, name="queue-worker").start()
     send_agent_menu()
 
     poll_errors = 0
