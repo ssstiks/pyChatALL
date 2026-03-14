@@ -64,6 +64,7 @@ from agents import (
     _parse_cli_output, _is_gemini_capacity_error, _gemini_fallback_retry,
     _run_subprocess, _run_cli, _run_passthrough,
     _find_binary, check_agents, _get_effective_bin, run_startup_check,
+    cancel_active_proc,
     ask_claude, ask_gemini, ask_qwen,
     compress_gemini, compress_openrouter,
     get_openrouter_key, set_openrouter_key, ask_openrouter,

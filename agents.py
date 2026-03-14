@@ -160,12 +160,29 @@ def _gemini_fallback_retry(binary: str, session_file: str, ctx_file: str,
 
 
 # ── SUBPROCESS HELPER ────────────────────────────────────────
+_active_proc: "subprocess.Popen | None" = None
+
+
+def cancel_active_proc() -> None:
+    """Kill the currently running subprocess, if any. Thread-safe under CPython GIL."""
+    global _active_proc
+    if _active_proc is not None and _active_proc.poll() is None:
+        _active_proc.kill()
+        try:
+            _active_proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            pass
+    _active_proc = None
+
+
 def _run_subprocess(cmd: list, timeout: int, cwd: str, env: dict
                     ) -> tuple[str, str, int, bool]:
     """Запускает процесс; при таймауте убивает его и ждёт завершения.
     Возвращает (stdout, stderr, returncode, timed_out)."""
+    global _active_proc
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, cwd=cwd, env=env)
+    _active_proc = proc
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
         return stdout, stderr, proc.returncode, False
@@ -176,6 +193,8 @@ def _run_subprocess(cmd: list, timeout: int, cwd: str, env: dict
         except subprocess.TimeoutExpired:
             pass
         return "", "", -1, True
+    finally:
+        _active_proc = None
 
 
 _NON_RETRYABLE_MARKERS = (
@@ -198,7 +217,7 @@ def _is_transient_error(stdout: str, stderr: str, rc: int, timed_out: bool) -> b
     Then: empty stdout (subprocess crash with no output) → True.
     rc=0 and timed_out=True are always False.
     """
-    if timed_out or rc == 0:
+    if timed_out or rc <= 0:
         return False
     combined = (stdout + stderr).lower()
     if any(m in combined for m in _NON_RETRYABLE_MARKERS):

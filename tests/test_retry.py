@@ -175,3 +175,11 @@ def test_run_cli_retry_fires_both_fail_returns_error():
 
     assert mock_sub.call_count == 2
     assert result  # not empty
+
+
+def test_sigkill_rc_negative9_is_not_retryable():
+    # On Linux, SIGKILL sets returncode = -9.
+    # This must NOT be retried — the process was intentionally killed.
+    assert _is_transient_error(
+        stdout="", stderr="", rc=-9, timed_out=False
+    ) is False
