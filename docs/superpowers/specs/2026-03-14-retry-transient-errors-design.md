@@ -51,12 +51,22 @@ Pure function. Returns `True` if the error is worth retrying automatically.
 
 | Condition | Rationale |
 |---|---|
-| `rc != 0` AND not `timed_out` AND output contains a 5xx pattern | Upstream API returned a server error |
-| `rc != 0` AND not `timed_out` AND `stdout` is empty | Subprocess crashed before producing output |
+| `rc != 0` AND not `timed_out` AND `stdout + stderr` contains a 5xx pattern | Upstream API returned a server error |
+| `rc != 0` AND not `timed_out` AND `stdout` is empty AND `stderr` contains no non-retryable marker | Subprocess crashed before producing output |
+
+The empty-stdout branch explicitly requires that `stderr` not contain any non-retryable marker (see list below). This prevents retrying auth errors that produce no stdout.
 
 ### 5xx patterns checked (case-insensitive, in `stdout + stderr`)
 
 `"500"`, `"502"`, `"503"`, `"504"`, `"overloaded"`, `"temporarily unavailable"`, `"service unavailable"`, `"internal server error"`
+
+### Non-retryable markers (case-insensitive, in `stdout + stderr`)
+
+Auth/permission: `"403"`, `"forbidden"`, `"request not allowed"`
+
+Rate-limit: `"429"`, `"rate limit"`, `"quota exceeded"`, `"too many requests"`
+
+If any non-retryable marker is present, `_is_transient_error` returns `False` regardless of other conditions. The non-retryable check runs before the 5xx/empty-stdout checks.
 
 ### Not retryable
 
@@ -64,14 +74,15 @@ Pure function. Returns `True` if the error is worth retrying automatically.
 |---|---|
 | `timed_out=True` | Already waited up to 10 minutes; retry wastes another full timeout |
 | `rc == 0` | Success — nothing to retry |
-| `rc != 0` with `"403"` or `"forbidden"` in output | Auth/permission problem, not transient |
-| `rc != 0` with rate-limit patterns | Already handled by existing `claude_rate_set` path |
+| Non-retryable marker in `stdout + stderr` | Auth/permission/rate-limit — not transient; existing handlers manage these |
 
 ---
 
 ## Retry Block in `_run_cli()`
 
-Inserted immediately after the first `_run_subprocess` call, before any result processing:
+Inserted immediately after the first `_run_subprocess` call, before any result processing.
+
+`_run_cli` signature (relevant excerpt): `def _run_cli(binary, session_file, ctx_file, agent_name, prompt, ...)`. The `agent_name` parameter (e.g., `"Claude"`, `"Gemini"`) is available as a local variable at the retry site.
 
 ```python
 if _is_transient_error(stdout, stderr, rc, timed_out):
@@ -92,12 +103,14 @@ if _is_transient_error(stdout, stderr, rc, timed_out):
 
 | Test | Input | Expected |
 |---|---|---|
-| 503 in stdout | `rc=1, timed_out=False, stdout="503"` | `True` |
-| "overloaded" in stderr | `rc=1, timed_out=False, stderr="overloaded"` | `True` |
-| empty stdout, rc≠0 | `rc=1, timed_out=False, stdout=""` | `True` |
-| timed out | `rc=-1, timed_out=True` | `False` |
-| rc=0 | `rc=0, timed_out=False` | `False` |
-| 403 in output | `rc=1, stdout="403 forbidden"` | `False` |
+| 503 in stdout | `rc=1, timed_out=False, stdout="503 service unavailable", stderr=""` | `True` |
+| "overloaded" in stderr, non-empty stdout | `rc=1, timed_out=False, stdout="partial output", stderr="overloaded"` | `True` |
+| empty stdout, clean stderr | `rc=1, timed_out=False, stdout="", stderr=""` | `True` |
+| empty stdout, 403 in stderr | `rc=1, timed_out=False, stdout="", stderr="403 forbidden"` | `False` |
+| timed out | `rc=-1, timed_out=True, stdout="", stderr=""` | `False` |
+| rc=0 (success, error-like text present) | `rc=0, timed_out=False, stdout="503", stderr=""` | `False` |
+| 403 in stdout | `rc=1, timed_out=False, stdout="403 forbidden", stderr=""` | `False` |
+| rate limit in output | `rc=1, timed_out=False, stdout="429 rate limit exceeded", stderr=""` | `False` |
 
 ### `_run_cli` retry integration tests
 
