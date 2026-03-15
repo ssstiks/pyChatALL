@@ -8,6 +8,7 @@ import json
 import mimetypes
 import os
 import shutil
+import signal
 import subprocess
 import time
 import threading
@@ -166,15 +167,28 @@ def _gemini_fallback_retry(binary: str, session_file: str, ctx_file: str,
 _active_proc: "subprocess.Popen | None" = None
 
 
+def _kill_proc_tree(proc: "subprocess.Popen") -> None:
+    """Kill the process and all its children (entire process group)."""
+    try:
+        pgid = os.getpgid(proc.pid)
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, OSError):
+        # Process already gone or getpgid failed — fall back to direct kill
+        try:
+            proc.kill()
+        except OSError:
+            pass
+    try:
+        proc.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def cancel_active_proc() -> None:
-    """Kill the currently running subprocess, if any. Thread-safe under CPython GIL."""
+    """Kill the currently running subprocess and its children. Thread-safe under CPython GIL."""
     global _active_proc
     if _active_proc is not None and _active_proc.poll() is None:
-        _active_proc.kill()
-        try:
-            _active_proc.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            pass
+        _kill_proc_tree(_active_proc)
     _active_proc = None
 
 
@@ -184,18 +198,18 @@ def _run_subprocess(cmd: list, timeout: int, cwd: str, env: dict
     Возвращает (stdout, stderr, returncode, timed_out)."""
     global _active_proc
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, cwd=cwd, env=env)
+                            text=True, cwd=cwd, env=env, start_new_session=True)
     _active_proc = proc
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
         return stdout, stderr, proc.returncode, False
     except subprocess.TimeoutExpired:
-        proc.kill()
+        _kill_proc_tree(proc)
         try:
-            proc.wait(timeout=5)
+            stdout, stderr = proc.communicate(timeout=2)
         except subprocess.TimeoutExpired:
-            pass
-        return "", "", -1, True
+            stdout, stderr = "", ""
+        return stdout, stderr, -1, True
     finally:
         _active_proc = None
 
