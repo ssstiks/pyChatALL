@@ -133,7 +133,11 @@ def _gemini_fallback_retry(binary: str, session_file: str, ctx_file: str,
             cmd += ["--resume", sid]
         cmd += ["--prompt", full_prompt]
 
-        stdout, stderr, rc, timed_out = _run_subprocess(cmd, timeout, WORK_DIR, env)
+        # Use a short timeout for fallback probes — we only need to detect
+        # whether the model is available, not wait for a full response.
+        # If the model IS available it will respond quickly (no internal retries).
+        fallback_timeout = min(45, timeout)
+        stdout, stderr, rc, timed_out = _run_subprocess(cmd, fallback_timeout, WORK_DIR, env)
 
         if timed_out or rc < 0:
             # Timed out or killed (e.g. SIGKILL from cancel button, rc=-9).
@@ -158,9 +162,10 @@ def _gemini_fallback_retry(binary: str, session_file: str, ctx_file: str,
         log_info(f"Gemini fallback success: {fallback}, reply={len(reply)}ch")
         return reply or stderr.strip()[:500] or "⚠️ Пустой ответ"
 
-    return (f"❌ Gemini недоступен — все модели перегружены или не найдены.\n"
+    return (f"❌ Gemini недоступен — все модели перегружены (квота исчерпана).\n"
             f"Попробованы: {', '.join(tried)}\n\n"
-            f"Смени модель вручную: /gemini /model list")
+            f"Переключись на другой агент: /claude или /qwen\n"
+            f"Или подожди сброса квоты Google (обычно к полуночи по PST).")
 
 
 # ── SUBPROCESS HELPER ────────────────────────────────────────
