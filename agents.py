@@ -134,9 +134,12 @@ def _gemini_fallback_retry(binary: str, session_file: str, ctx_file: str,
 
         stdout, stderr, rc, timed_out = _run_subprocess(cmd, timeout, WORK_DIR, env)
 
-        if timed_out:
-            log_error(f"Gemini fallback {fallback} TIMEOUT")
-            continue
+        if timed_out or rc < 0:
+            # Timed out or killed (e.g. SIGKILL from cancel button, rc=-9).
+            # Don't continue trying other models — user cancelled or something
+            # went badly wrong.
+            log_error(f"Gemini fallback {fallback} TIMEOUT or killed (rc={rc})")
+            break
 
         # Проверяем только stderr при ненулевом rc — иначе текст ответа
         # (stdout) может содержать те же фразы и вызвать ложное срабатывание.
