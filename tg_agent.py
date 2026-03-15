@@ -811,6 +811,7 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
 
     t.join()
     if _cancel_event.is_set():
+        _cancel_event.clear()
         return  # Cancel handler already edited placeholder to "❌ Запрос отменён"
     reply = result_box[0] if result_box else "❌ Нет ответа"
 
