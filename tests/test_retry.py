@@ -112,6 +112,7 @@ def test_run_cli_retries_on_transient_error_and_succeeds():
     with patch("agents._run_subprocess", side_effect=[fail, success]) as mock_sub, \
          patch("ui.tg_send"), \
          patch("agents._load_session", return_value=None), \
+         patch("agents._save_session"), \
          patch("agents.memory_load", return_value=""), \
          patch("agents.shared_ctx_for_prompt", return_value=""), \
          patch("agents._add_ctx", return_value=0), \
@@ -130,6 +131,7 @@ def test_run_cli_no_retry_on_timeout():
     with patch("agents._run_subprocess", return_value=timed_out_result) as mock_sub, \
          patch("ui.tg_send"), \
          patch("agents._load_session", return_value=None), \
+         patch("agents._save_session"), \
          patch("agents.memory_load", return_value=""), \
          patch("agents.shared_ctx_for_prompt", return_value=""), \
          patch("agents._add_ctx", return_value=0), \
@@ -149,6 +151,7 @@ def test_run_cli_no_retry_on_403():
     with patch("agents._run_subprocess", return_value=auth_error) as mock_sub, \
          patch("ui.tg_send"), \
          patch("agents._load_session", return_value=None), \
+         patch("agents._save_session"), \
          patch("agents.memory_load", return_value=""), \
          patch("agents.shared_ctx_for_prompt", return_value=""), \
          patch("agents._add_ctx", return_value=0), \
@@ -166,6 +169,7 @@ def test_run_cli_retry_fires_both_fail_returns_error():
     with patch("agents._run_subprocess", return_value=fail) as mock_sub, \
          patch("ui.tg_send"), \
          patch("agents._load_session", return_value=None), \
+         patch("agents._save_session"), \
          patch("agents.memory_load", return_value=""), \
          patch("agents.shared_ctx_for_prompt", return_value=""), \
          patch("agents._add_ctx", return_value=0), \
