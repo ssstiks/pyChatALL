@@ -352,9 +352,10 @@ def _run_cli(binary: str, session_file: str, ctx_file: str,
                 return msg
 
         # Gemini: ошибка модели → авто-переключение на fallback.
-        # Проверяем ТОЛЬКО stderr при rc != 0: stdout содержит текст ответа,
+        # Проверяем ТОЛЬКО stderr при rc > 0: stdout содержит текст ответа,
         # который может случайно содержать те же ключевые слова.
-        if agent_key == "gemini" and rc != 0 and _is_gemini_capacity_error(stderr):
+        # rc < 0 означает SIGKILL (отмена пользователем) — fallback не нужен.
+        if agent_key == "gemini" and rc > 0 and _is_gemini_capacity_error(stderr):
             return _gemini_fallback_retry(
                 binary, session_file, ctx_file, full_prompt, file_path, timeout_secs, env
             )
