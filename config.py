@@ -67,7 +67,7 @@ CTX_LIMITS = {
 
 # ── Таймауты агентов (секунды) ────────────────────────────────
 _AGENT_TIMEOUT: dict[str, int] = {
-    "claude":     300,
+    "claude":     800,
     "gemini":     600,
     "qwen":       300,
     "openrouter": 120,
