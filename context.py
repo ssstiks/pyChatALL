@@ -270,8 +270,10 @@ def _detect_rate_limit(text: str) -> int | None:
     Возвращает количество секунд до снятия лимита или None.
     """
     text_low = text.lower()
-    rate_keywords = ["rate limit", "rate_limit", "overloaded", "too many requests",
-                     "429", "usage limit", "quota"]
+    # Narrow keywords to avoid false positives even on stderr.
+    # "quota" and "overloaded" are too generic; real Claude rate-limit errors
+    # always contain "rate_limit", "rate limit", or explicit HTTP 429.
+    rate_keywords = ["rate_limit_error", "rate limit", "too many requests", "429"]
     if not any(kw in text_low for kw in rate_keywords):
         return None
 
@@ -294,7 +296,10 @@ def _detect_rate_limit(text: str) -> int | None:
         else:
             return n
 
-    return 5 * 3600
+    # No specific retry-after found — use a conservative 30-minute default.
+    # Anthropic always includes retry-after on real rate limits, so this
+    # path should rarely fire; 30m is short enough to auto-recover quickly.
+    return 30 * 60
 
 
 # ── ДОЛГОВРЕМЕННАЯ ПАМЯТЬ ─────────────────────────────────────
