@@ -347,9 +347,11 @@ def _run_cli(binary: str, session_file: str, ctx_file: str,
         if rc != 0 and not raw:
             log_warn(f"  {agent_name} exit={rc} stderr: {stderr.strip()[:300]}")
 
-        combined = raw + "\n" + stderr
-        if is_claude:
-            secs = _detect_rate_limit(combined)
+        # Only check for rate limits on error responses (rc != 0) and only in
+        # stderr — scanning raw stdout causes false positives when Claude's
+        # reply happens to mention "quota", "overloaded", etc. in normal text.
+        if is_claude and rc != 0:
+            secs = _detect_rate_limit(stderr)
             if secs:
                 claude_rate_set(secs)
                 msg = claude_rate_msg()
