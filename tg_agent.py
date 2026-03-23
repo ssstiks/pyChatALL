@@ -86,6 +86,7 @@ from ui import (
 )
 
 import team_mode
+from memory_manager import get_memory_manager
 
 _request_queue: "queue.Queue[tuple[str, str | None]]" = queue.Queue()
 _cancel_event = threading.Event()
@@ -420,6 +421,8 @@ def send_to_agent(agent: str, prompt: str, file_path: str | None = None) -> None
         reply = f"❌ Ошибка: {e}"
     lbl = agent_label(agent)
     shared_ctx_add("assistant", reply, AGENT_NAMES[agent])
+    # Shadow Librarian: update English memory in background (non-blocking daemon thread)
+    get_memory_manager().update_background(prompt, reply)
     found_files = _detect_files_in_text(reply)
     file_markup = _files_keyboard(found_files) if found_files else None
     full = f"[{lbl}]\n{reply}"
