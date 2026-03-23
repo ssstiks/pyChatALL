@@ -24,6 +24,7 @@ from config import (
     SHARED_CTX_MSGS, SHARED_CTX_CHARS,
 )
 from logger import log_info, log_warn, log_error
+from memory_manager import get_memory_manager
 
 
 # ── МОДЕЛИ ───────────────────────────────────────────────────
@@ -200,6 +201,47 @@ def shared_ctx_for_prompt() -> str:
         )
         text = text + rate_note if text else rate_note
     return text
+
+
+def global_ctx_for_prompt(skip_recent: bool = False) -> str:
+    """
+    Token-efficient context injection:
+      [MEMORY: {JSON}]          ← English summary (~200-400 tokens)
+      [Recent context (RU): ...]  ← Last 3 raw RU messages (skipped when skip_recent=True)
+
+    skip_recent=True: use for Claude with active session (CLI already has session history,
+    injecting recent messages would duplicate context and waste tokens).
+
+    Replaces verbose shared_ctx_for_prompt() for CLI agents (Claude/Gemini/Qwen).
+    OpenRouter API path continues to use shared_ctx_for_api() — out of scope.
+    """
+    parts: list[str] = []
+
+    # 1. English memory JSON block (always included)
+    mm = get_memory_manager()
+    parts.append(mm.to_prompt_block())
+
+    # 2. Last 3 raw Russian messages — skip for Claude with active session
+    if not skip_recent:
+        try:
+            if os.path.exists(SHARED_CTX_FILE):
+                with open(SHARED_CTX_FILE, encoding="utf-8") as f:
+                    msgs = json.load(f)
+                if isinstance(msgs, list) and msgs:
+                    recent = msgs[-3:]
+                    lines = []
+                    for m in recent:
+                        role = m.get("role", "?")
+                        agent = m.get("agent", "")
+                        content = str(m.get("content", ""))[:500]  # hard cap per message
+                        label = f"{agent}({role})" if agent else role
+                        lines.append(f"[{label}]: {content}")
+                    if lines:
+                        parts.append("[Recent context (RU):\n" + "\n".join(lines) + "]")
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    return "\n\n".join(parts)
 
 
 def shared_ctx_for_api() -> list:
