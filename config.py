@@ -43,6 +43,7 @@ MEMORY_FILE      = f"{STATE_DIR}/memory.md"
 DISCUSS_FILE     = f"{STATE_DIR}/discuss_agents.json"
 DISCUSS_AWAIT_FILE = f"{STATE_DIR}/discuss_await.txt"
 SETUP_DONE_FILE  = f"{STATE_DIR}/setup_done.txt"
+GLOBAL_MEMORY_FILE = f"{STATE_DIR}/global_memory.json"
 ALL_AGENTS_FILE  = f"{STATE_DIR}/all_agents.txt"
 
 MODEL_FILES = {
