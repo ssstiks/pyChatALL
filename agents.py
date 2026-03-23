@@ -29,6 +29,7 @@ from context import (
     get_model, set_model, agent_label,
     _load_session, _save_session, _get_ctx, _add_ctx, _reset_session,
     shared_ctx_for_prompt, shared_ctx_for_api, shared_ctx_add,
+    global_ctx_for_prompt,
     claude_rate_set, claude_rate_msg, _detect_rate_limit,
     memory_load,
 )
@@ -264,13 +265,9 @@ def _run_cli(binary: str, session_file: str, ctx_file: str,
 
     is_claude = "claude" in binary
 
-    # Для Claude с активной сессией CLI уже несёт полную историю разговора —
-    # повторная вставка shared_ctx дублирует токены. Вставляем только память.
-    if is_claude and _load_session(session_file):
-        mem = memory_load()
-        ctx_text = f"[Долговременная память пользователя:\n{mem}\n]" if mem else ""
-    else:
-        ctx_text = shared_ctx_for_prompt()
+    # skip_recent=True when Claude has active session (CLI already has history)
+    sid = _load_session(session_file) if is_claude else None
+    ctx_text = global_ctx_for_prompt(skip_recent=bool(sid))
 
     parts = []
     if ctx_text:
