@@ -86,6 +86,7 @@ from ui import (
 )
 
 import team_mode
+import voice as _voice_mod
 from memory_manager import get_memory_manager
 
 _request_queue: "queue.Queue[tuple[str, str | None]]" = queue.Queue()
@@ -465,6 +466,37 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
     tg_typing()
     text = text.strip()
     log_info(f"MSG: {text[:120]!r}" + (f" + file:{os.path.basename(file_path)}" if file_path else ""))
+
+    # ── Voice transcription (runs in _queue_worker thread) ────
+    if file_path and _voice_mod.is_voice_file(file_path):
+        try:
+            import importlib.util
+            if importlib.util.find_spec("whisper") is None:
+                tg_send("📦 Устанавливаю Whisper (первый раз, ~30 сек)...")
+            elif _voice_mod._whisper_model is None:
+                tg_send("⏳ Загружаю модель Whisper (первый запуск, ~1 мин)...")
+
+            transcribed = _voice_mod.transcribe_voice(file_path)
+        except RuntimeError as e:
+            tg_send(f"⚠️ {e}")
+            return
+        except Exception as e:
+            log_error("voice transcription failed", e)
+            tg_send("🎤 Ошибка транскрипции")
+            return
+        finally:
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
+
+        if not transcribed:
+            tg_send("🎤 Речь не распознана")
+            return
+
+        text = f"[Голосовое сообщение]: {transcribed}"
+        file_path = None
+    # ── end voice block ───────────────────────────────────────
 
     # Режим ожидания сообщения git commit
     git_await_file = f"{STATE_DIR}/git_commit_await.txt"
@@ -1178,9 +1210,13 @@ def process_update(upd: dict) -> None:
         if not prompt_text:
             prompt_text = f"Обработай файл {fname}."
     elif voice:
-        file_path = download_tg_file(voice["file_id"], "voice.ogg")
-        if not prompt_text:
-            prompt_text = "Это голосовое сообщение (ogg). Укажи что можешь с ним сделать."
+        local_path = download_tg_file(voice["file_id"], "voice.ogg")
+        if not local_path:
+            return  # download failed — silent skip
+        _request_queue.put(("", local_path))
+        if _worker_busy.is_set() or _request_queue.qsize() > 0:
+            tg_send("📋 В очереди (голосовое)")
+        return
     elif audio:
         fname = audio.get("file_name", "audio.mp3")
         file_path = download_tg_file(audio["file_id"], fname)
