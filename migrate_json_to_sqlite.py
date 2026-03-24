@@ -13,6 +13,9 @@ from datetime import datetime
 from config import STATE_DIR, DB_PATH
 from db_manager import Database
 
+# Supported agents for migration
+SUPPORTED_AGENTS = ['claude', 'gemini', 'qwen', 'openrouter']
+
 
 def detect_json_state_files(state_dir):
     """Detect existing JSON/TXT state files"""
@@ -39,13 +42,22 @@ def migrate_json_to_sqlite():
     db = Database(DB_PATH)
     db.initialize()
 
-    # Create backup directory
+    # Create backup directory with validation
     backup_dir = os.path.join(STATE_DIR, f'state_backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}')
-    os.makedirs(backup_dir, exist_ok=True)
+    try:
+        os.makedirs(backup_dir, exist_ok=True)
+        # Verify directory is writable
+        test_file = os.path.join(backup_dir, '.writable_test')
+        with open(test_file, 'w') as f:
+            f.write('test')
+        os.remove(test_file)
+    except Exception as e:
+        print(f"✗ Cannot create backup directory {backup_dir}: {e}")
+        return False
 
     try:
         # Migrate sessions
-        for agent in ['claude', 'gemini', 'qwen', 'openrouter']:
+        for agent in SUPPORTED_AGENTS:
             session_file = os.path.join(STATE_DIR, f'{agent}_session.txt')
             if os.path.exists(session_file):
                 with open(session_file, 'r') as f:
@@ -55,16 +67,22 @@ def migrate_json_to_sqlite():
                 shutil.copy2(session_file, backup_dir)
 
         # Migrate context usage
-        for agent in ['claude', 'gemini', 'qwen', 'openrouter']:
+        for agent in SUPPORTED_AGENTS:
             ctx_file = os.path.join(STATE_DIR, f'{agent}_ctx_chars.txt')
             if os.path.exists(ctx_file):
-                with open(ctx_file, 'r') as f:
-                    chars = int(f.read().strip() or '0')
-                db.update_context_usage(agent, chars)
-                shutil.copy2(ctx_file, backup_dir)
+                try:
+                    with open(ctx_file, 'r') as f:
+                        content = f.read().strip()
+                        chars = int(content) if content else 0
+                    db.update_context_usage(agent, chars)
+                    shutil.copy2(ctx_file, backup_dir)
+                except ValueError as e:
+                    print(f"⚠ Warning: {agent}_ctx_chars.txt has invalid integer, skipping: {e}")
+                except Exception as e:
+                    print(f"⚠ Warning: Failed to migrate {agent}_ctx_chars.txt: {e}")
 
         # Migrate model selections
-        for agent in ['claude', 'gemini', 'qwen', 'openrouter']:
+        for agent in SUPPORTED_AGENTS:
             model_file = os.path.join(STATE_DIR, f'{agent}_model.txt')
             if os.path.exists(model_file):
                 with open(model_file, 'r') as f:
@@ -76,24 +94,34 @@ def migrate_json_to_sqlite():
         # Migrate shared context
         shared_ctx_file = os.path.join(STATE_DIR, 'shared_context.json')
         if os.path.exists(shared_ctx_file):
-            with open(shared_ctx_file, 'r') as f:
-                shared_ctx = json.load(f)
-            if isinstance(shared_ctx, list):
-                for msg in shared_ctx:
-                    db.add_message(
-                        role=msg.get('role', 'user'),
-                        content=msg.get('content', ''),
-                        agent=msg.get('agent')
-                    )
-            shutil.copy2(shared_ctx_file, backup_dir)
+            try:
+                with open(shared_ctx_file, 'r') as f:
+                    shared_ctx = json.load(f)
+                if isinstance(shared_ctx, list):
+                    for msg in shared_ctx:
+                        db.add_message(
+                            role=msg.get('role', 'user'),
+                            content=msg.get('content', ''),
+                            agent=msg.get('agent')
+                        )
+                shutil.copy2(shared_ctx_file, backup_dir)
+            except json.JSONDecodeError as e:
+                print(f"⚠ Warning: shared_context.json is corrupted, skipping: {e}")
+            except Exception as e:
+                print(f"⚠ Warning: Failed to migrate shared context: {e}")
 
         # Migrate memory
         memory_file = os.path.join(STATE_DIR, 'global_memory.json')
         if os.path.exists(memory_file):
-            with open(memory_file, 'r') as f:
-                memory_data = json.load(f)
-            db.save_memory(memory_data)
-            shutil.copy2(memory_file, backup_dir)
+            try:
+                with open(memory_file, 'r') as f:
+                    memory_data = json.load(f)
+                db.save_memory(memory_data)
+                shutil.copy2(memory_file, backup_dir)
+            except json.JSONDecodeError as e:
+                print(f"⚠ Warning: global_memory.json is corrupted, skipping: {e}")
+            except Exception as e:
+                print(f"⚠ Warning: Failed to migrate memory: {e}")
 
         # Migrate active agent setting
         active_agent_file = os.path.join(STATE_DIR, 'active_agent.txt')
@@ -117,10 +145,14 @@ def migrate_json_to_sqlite():
         print(f"✓ {len(existing_files)} files migrated to SQLite")
         return True
 
-    except Exception as e:
+    except (IOError, json.JSONDecodeError, ValueError, TypeError) as e:
         print(f"✗ Migration failed: {e}")
         print(f"  Backup available in {backup_dir}")
         return False
+    except Exception as e:
+        print(f"✗ Unexpected error during migration: {e}")
+        print(f"  Backup available in {backup_dir}")
+        raise
 
 
 if __name__ == '__main__':
