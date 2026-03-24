@@ -34,9 +34,12 @@ class Database:
         try:
             yield conn
             conn.commit()
-        except Exception:
+        except sqlite3.DatabaseError as e:
             conn.rollback()
-            raise
+            raise  # Re-raise to let caller handle
+        except Exception as e:
+            conn.rollback()
+            raise  # Unexpected error - still rollback but re-raise
         finally:
             conn.close()
 
@@ -214,24 +217,43 @@ class Database:
             )
             row = cursor.fetchone()
             if row:
+                try:
+                    user_profile = json.loads(row[0])
+                except (json.JSONDecodeError, ValueError):
+                    user_profile = {}
+
+                try:
+                    project_state = json.loads(row[1])
+                except (json.JSONDecodeError, ValueError):
+                    project_state = {}
+
                 return {
-                    'user_profile': json.loads(row[0]),
-                    'project_state': json.loads(row[1]),
-                    'short_term_context': row[2]
+                    'user_profile': user_profile,
+                    'project_state': project_state,
+                    'short_term_context': row[2] or ''
                 }
             return {'user_profile': {}, 'project_state': {}, 'short_term_context': ''}
 
     def save_memory(self, memory_data, user_id='default'):
         """Save user memory"""
+        if not isinstance(memory_data, dict):
+            raise TypeError("memory_data must be a dictionary")
+
         with self.get_connection() as conn:
             cursor = conn.cursor()
+            try:
+                user_profile_json = json.dumps(memory_data.get('user_profile', {}))
+                project_state_json = json.dumps(memory_data.get('project_state', {}))
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"memory_data contains non-JSON-serializable objects: {e}")
+
             cursor.execute(
                 '''INSERT OR REPLACE INTO memory (user_id, user_profile_json, project_state_json, short_term_context)
                    VALUES (?, ?, ?, ?)''',
                 (
                     user_id,
-                    json.dumps(memory_data.get('user_profile', {})),
-                    json.dumps(memory_data.get('project_state', {})),
+                    user_profile_json,
+                    project_state_json,
                     memory_data.get('short_term_context', '')
                 )
             )
