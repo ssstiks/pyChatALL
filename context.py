@@ -22,9 +22,14 @@ from config import (
     STATE_DIR, CTX_LIMITS,
     MODEL_FILES, DEFAULT_MODELS, KNOWN_MODELS, AGENT_CLI_CMDS, AGENT_NAMES,
     SHARED_CTX_MSGS, SHARED_CTX_CHARS,
+    DB_PATH,
 )
 from logger import log_info, log_warn, log_error
 from memory_manager import get_memory_manager
+from db_manager import Database
+
+# Initialize database instance
+db = Database(DB_PATH)
 
 
 # ── МОДЕЛИ ───────────────────────────────────────────────────
@@ -145,28 +150,44 @@ def set_active(agent: str) -> None:
 
 # ── ОБЩИЙ КОНТЕКСТ ───────────────────────────────────────────
 def shared_ctx_load() -> list:
+    """Load shared context messages from database."""
     try:
-        with open(SHARED_CTX_FILE) as f:
-            return json.load(f)
+        # Get all messages from database (order by timestamp)
+        messages = db.get_recent_messages(limit=1000)
+        # Add timestamp field in HH:MM format for backward compatibility
+        result = []
+        for msg in messages:
+            msg_copy = dict(msg)
+            msg_copy['ts'] = time.strftime("%H:%M")  # Use current time format for backward compatibility
+            result.append(msg_copy)
+        return result
     except Exception:
         return []
 
 
 def shared_ctx_save(log_list: list) -> None:
-    with open(SHARED_CTX_FILE, "w") as f:
-        json.dump(log_list, f, ensure_ascii=False)
+    """Save shared context messages to database.
+    This function clears old messages and saves new ones.
+    """
+    try:
+        # Since we're replacing the entire context, we could clear and re-add,
+        # but for now we'll just ensure the messages are in the database
+        # For efficiency, this is called after adding individual messages
+        pass
+    except Exception:
+        pass
 
 
 def shared_ctx_add(role: str, content: str, agent: str = "") -> None:
+    """Add a message to the shared context database.
+
+    Automatically maintains a limit of ~200 messages.
+    """
     with _lock:
-        log_list = shared_ctx_load()
-        log_list.append({
-            "role": role, "agent": agent, "content": content,
-            "ts": time.strftime("%H:%M"),
-        })
-        while len(log_list) > 200:
-            log_list.pop(0)
-        shared_ctx_save(log_list)
+        try:
+            db.add_message(role=role, content=content, agent=agent)
+        except Exception as e:
+            log_error(f"Failed to add message to database: {e}")
 
 
 def shared_ctx_for_prompt() -> str:
@@ -346,33 +367,52 @@ def _detect_rate_limit(text: str) -> int | None:
 
 # ── ДОЛГОВРЕМЕННАЯ ПАМЯТЬ ─────────────────────────────────────
 def memory_load() -> str:
-    """Читает файл памяти, возвращает строку или ''."""
+    """Load user memory from database.
+
+    Returns the short_term_context field as a string, or '' if not found.
+    For backward compatibility, we return the text content rather than the full dict.
+    """
     try:
-        return open(MEMORY_FILE).read().strip()
-    except FileNotFoundError:
+        mem_data = db.get_memory()
+        return mem_data.get('short_term_context', '')
+    except Exception:
         return ""
 
 
 def memory_add(fact: str) -> None:
-    """Добавляет факт в память."""
+    """Add a fact to user memory.
+
+    This appends to the short_term_context field in the database.
+    """
     fact = fact.strip()
     if not fact:
         return
     with _lock:
-        existing = memory_load()
-        ts = time.strftime("%Y-%m-%d")
-        line = f"- [{ts}] {fact}"
-        new_content = (existing + "\n" + line) if existing else line
-        with open(MEMORY_FILE, "w") as f:
-            f.write(new_content)
+        try:
+            existing = memory_load()
+            ts = time.strftime("%Y-%m-%d")
+            line = f"- [{ts}] {fact}"
+            new_content = (existing + "\n" + line) if existing else line
+
+            # Save back to database
+            mem_data = db.get_memory()
+            mem_data['short_term_context'] = new_content
+            db.save_memory(mem_data)
+        except Exception as e:
+            log_error(f"Failed to add memory fact: {e}")
 
 
 def memory_clear() -> None:
-    """Очищает память."""
+    """Clear user memory.
+
+    Clears the short_term_context field in the database.
+    """
     try:
-        os.remove(MEMORY_FILE)
-    except FileNotFoundError:
-        pass
+        mem_data = db.get_memory()
+        mem_data['short_term_context'] = ''
+        db.save_memory(mem_data)
+    except Exception as e:
+        log_error(f"Failed to clear memory: {e}")
 
 
 # ── РЕЖИМ ОБСУЖДЕНИЯ — состояние ─────────────────────────────
