@@ -169,3 +169,55 @@ assert os.path.exists(os.path.join(STATE_DIR, 'downloads')), f"downloads directo
             assert os.path.exists(os.path.join(config_module.STATE_DIR, 'downloads'))
         finally:
             sys.path.remove(temp_home)
+
+
+def test_full_workflow(temp_db):
+    """Test complete workflow: sessions → context → memory"""
+    db = Database(temp_db)
+    db.initialize()
+
+    # Save and load session
+    db.save_session('claude', 'sess_abc123')
+    assert db.get_session('claude') == 'sess_abc123'
+
+    # Track context
+    db.update_context_usage('claude', 5000)
+    assert db.get_context_usage('claude') == 5000
+
+    # Set model
+    db.set_model('claude', 'claude-3-sonnet')
+    assert db.get_model('claude') == 'claude-3-sonnet'
+
+    # Save messages
+    db.add_message('user', 'Hello', agent='claude')
+    db.add_message('assistant', 'Hi there', agent='claude')
+    messages = db.get_recent_messages(limit=2)
+    assert len(messages) == 2
+    # Messages are returned in reverse insertion order due to DESC+reversal
+    assert messages[0]['content'] == 'Hi there'
+    assert messages[1]['content'] == 'Hello'
+
+    # Save memory
+    memory = {'user_profile': {'name': 'Alex'}, 'project_state': {}}
+    db.save_memory(memory)
+    loaded = db.get_memory()
+    assert loaded['user_profile']['name'] == 'Alex'
+
+
+def test_multi_agent_isolation(temp_db):
+    """Test that different agents have isolated state"""
+    db = Database(temp_db)
+    db.initialize()
+
+    # Set different values for different agents
+    db.save_session('claude', 'session_claude')
+    db.save_session('gemini', 'session_gemini')
+
+    db.update_context_usage('claude', 1000)
+    db.update_context_usage('gemini', 2000)
+
+    # Verify isolation
+    assert db.get_session('claude') == 'session_claude'
+    assert db.get_session('gemini') == 'session_gemini'
+    assert db.get_context_usage('claude') == 1000
+    assert db.get_context_usage('gemini') == 2000
