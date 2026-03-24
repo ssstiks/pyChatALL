@@ -986,6 +986,7 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
 # ── ОБРАБОТКА ОБНОВЛЕНИЙ ─────────────────────────────────────
 def handle_callback(cb: dict) -> None:
     """Обрабатывает нажатие инлайн-кнопок."""
+    global _timeout_extend_count
     if (cb.get("from", {}).get("id") != ALLOWED_CHAT and
             cb.get("message", {}).get("chat", {}).get("id") != ALLOWED_CHAT):
         return
@@ -1019,6 +1020,21 @@ def handle_callback(cb: dict) -> None:
             ).start()
         else:
             tg_send("⚠️ Нет сохранённого запроса для повтора.")
+
+    elif data == "extend_timeout":
+        if _worker_busy.is_set():
+            with _timeout_extend_lock:
+                _timeout_extend_count += 1
+            tg_answer_cb(cb_id, "⏳ +5 мин добавлено")
+        else:
+            tg_answer_cb(cb_id, "Нет активного запроса")
+
+    elif data == "no_timeout":
+        if _worker_busy.is_set():
+            _no_timeout_event.set()
+            tg_answer_cb(cb_id, "∞ Таймаут снят")
+        else:
+            tg_answer_cb(cb_id, "Нет активного запроса")
 
     elif data.startswith("agent:"):
         agent = data.split(":", 1)[1]

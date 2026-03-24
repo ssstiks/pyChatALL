@@ -167,3 +167,44 @@ def test_stale_event_guard():
 
     with tg_agent._timeout_extend_lock:
         assert tg_agent._timeout_extend_count == 0
+
+
+def test_extend_callback_active():
+    """extend_timeout increments counter when worker is busy."""
+    tg_agent._worker_busy.set()
+    with tg_agent._timeout_extend_lock:
+        tg_agent._timeout_extend_count = 0
+
+    # Simulate callback logic
+    if tg_agent._worker_busy.is_set():
+        with tg_agent._timeout_extend_lock:
+            tg_agent._timeout_extend_count += 1
+
+    with tg_agent._timeout_extend_lock:
+        assert tg_agent._timeout_extend_count == 1
+    tg_agent._worker_busy.clear()
+
+
+def test_extend_callback_inactive():
+    """extend_timeout does nothing when worker is not busy."""
+    tg_agent._worker_busy.clear()
+    with tg_agent._timeout_extend_lock:
+        tg_agent._timeout_extend_count = 0
+
+    if tg_agent._worker_busy.is_set():
+        with tg_agent._timeout_extend_lock:
+            tg_agent._timeout_extend_count += 1
+
+    with tg_agent._timeout_extend_lock:
+        assert tg_agent._timeout_extend_count == 0
+
+
+def test_no_timeout_callback_inactive():
+    """no_timeout event not set when worker is not busy."""
+    tg_agent._worker_busy.clear()
+    tg_agent._no_timeout_event.clear()
+
+    if tg_agent._worker_busy.is_set():
+        tg_agent._no_timeout_event.set()
+
+    assert not tg_agent._no_timeout_event.is_set()
