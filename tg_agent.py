@@ -92,6 +92,9 @@ from memory_manager import get_memory_manager
 _request_queue: "queue.Queue[tuple[str, str | None]]" = queue.Queue()
 _cancel_event = threading.Event()
 _worker_busy = threading.Event()
+_timeout_extend_count = 0               # incremented per "+5 мин" press
+_timeout_extend_lock  = threading.Lock()
+_no_timeout_event     = threading.Event()
 
 # Mutable _last_request (из config — изменяем здесь)
 _last_request: dict = {}
@@ -458,6 +461,54 @@ def _queue_worker() -> None:
                 _worker_busy.clear()
         finally:
             _request_queue.task_done()
+
+
+# ── TIMEOUT / HEARTBEAT HELPERS ──────────────────────────────
+POLL_INTERVAL = 5
+HB_FAST_SECS  = 180
+HB_FAST_EVERY = 30
+HB_SLOW_EVERY = 60
+
+
+def _placeholder_text(lbl: str, elapsed: float,
+                      remaining: int | None, no_limit: bool = False) -> str:
+    """Format the agent-thinking placeholder message text."""
+    e_min, e_sec = divmod(int(elapsed), 60)
+    e_str = f"{e_min}м {e_sec:02d}с" if e_min else f"{e_sec}с"
+    if no_limit:
+        return f"⏳ {lbl} думает... {e_str} (без лимита)"
+    if remaining is not None:
+        r_min, r_sec = divmod(remaining, 60)
+        r_str = f"{r_min}м {r_sec:02d}с" if r_min else f"{r_sec}с"
+        return f"⏳ {lbl} думает... {e_str} / осталось {r_str}"
+    return f"⏳ {lbl} думает... {e_str}"
+
+
+def _agent_kb_full() -> dict:
+    """3-button keyboard used during active agent wait."""
+    return kb([[
+        ("⏳ +5 мин",    "extend_timeout"),
+        ("∞ Без лимита", "no_timeout"),
+        ("🛑 Отмена",     "cancel_current"),
+    ]])
+
+
+def _agent_kb_cancel_only() -> dict:
+    """1-button keyboard after no-limit is pressed."""
+    return kb([[("🛑 Отмена", "cancel_current")]])
+
+
+def _edit_placeholder(ph_id, lbl: str, elapsed: float,
+                      remaining: int | None, no_limit: bool) -> None:
+    """Edit the placeholder message. Derives keyboard from no_limit. Silent on error."""
+    if ph_id is None:
+        return
+    markup = _agent_kb_cancel_only() if no_limit else _agent_kb_full()
+    text   = _placeholder_text(lbl, elapsed, remaining, no_limit)
+    try:
+        tg_edit(ph_id, text, markup)
+    except Exception:
+        pass
 
 
 # ── РОУТЕР ────────────────────────────────────────────────────
