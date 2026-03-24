@@ -513,7 +513,7 @@ def _edit_placeholder(ph_id, lbl: str, elapsed: float,
 
 # ── РОУТЕР ────────────────────────────────────────────────────
 def route_and_reply(text: str, file_path: str | None = None) -> None:
-    global _last_request
+    global _last_request, _timeout_extend_count
     tg_typing()
     text = text.strip()
     log_info(f"MSG: {text[:120]!r}" + (f" + file:{os.path.basename(file_path)}" if file_path else ""))
@@ -857,48 +857,101 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
         log_entry += f" {file_hint(file_path)}"
     shared_ctx_add("user", log_entry)
 
-    lbl = agent_label(agent)
+    lbl          = agent_label(agent)
     timeout_secs = _AGENT_TIMEOUT.get(agent, 300)
-    timeout_mins = timeout_secs // 60
-    cancel_markup = kb([[("🛑 Отмена", "cancel_current")]])
-    ph = tg_send(f"⏳ {lbl} думает... (макс {timeout_mins} мин)", cancel_markup)
+
+    # Clear all control events for this request
+    _cancel_event.clear()
+    _no_timeout_event.clear()
+    with _timeout_extend_lock:
+        _timeout_extend_count = 0
+
+    start_time = time.time()
+    deadline   = start_time + timeout_secs
+    no_limit   = False
+    last_hb    = start_time
+
+    ph = tg_send(
+        _placeholder_text(lbl, elapsed=0, remaining=timeout_secs),
+        _agent_kb_full(),
+    )
     ph_id = ph["message_id"] if ph else None
 
-    # Commit point: cancel may have fired between dequeue and placeholder send.
-    # Edit the new placeholder and return if cancel is set.
-    # The cancel handler may concurrently edit the same placeholder — this is a
-    # benign double-edit: tg_edit handles 400 "message not modified" gracefully.
+    # Early cancel check (between dequeue and placeholder send)
     if _cancel_event.is_set():
         if ph_id:
             tg_edit(ph_id, "❌ Запрос отменён")
         _cancel_event.clear()
         return
-    _cancel_event.clear()  # Committed to this request — clear any stale cancel state
 
     result_box: list[str] = []
+    timed_out = False
 
     def _worker():
         result_box.append(AGENT_FN[agent](prompt, file_path))
 
     t = threading.Thread(target=_worker, daemon=True)
     t.start()
-    t_start = time.time()
 
-    while t.is_alive():
-        time.sleep(5)
-        if _cancel_event.is_set():
-            break
+    while True:
+        t.join(timeout=POLL_INTERVAL)
+
         if not t.is_alive():
-            break
-        elapsed = int(time.time() - t_start)
-        if ph_id:
-            tg_edit(ph_id, f"⏳ {lbl} думает... {elapsed}с / {timeout_secs}с", cancel_markup)
-        tg_typing()
+            break  # normal completion
 
-    t.join()
+        now     = time.time()
+        elapsed = now - start_time
+
+        # 1. Cancel (highest priority)
+        if _cancel_event.is_set():
+            cancel_active_proc()
+            t.join(3)
+            break
+
+        # 2. Extend deadline
+        with _timeout_extend_lock:
+            count = _timeout_extend_count
+            _timeout_extend_count = 0
+        if count > 0:
+            deadline += 300 * count
+            remaining = max(0, int(deadline - now))
+            _edit_placeholder(ph_id, lbl, elapsed, remaining, no_limit=False)
+
+        # 3. Remove timeout
+        if _no_timeout_event.is_set():
+            _no_timeout_event.clear()
+            deadline  = float("inf")
+            no_limit  = True
+            _edit_placeholder(ph_id, lbl, elapsed, remaining=None, no_limit=True)
+
+        # 4. Hard timeout
+        if not no_limit and now >= deadline:
+            cancel_active_proc()
+            t.join(3)
+            timed_out = True
+            break
+
+        # 5. Heartbeat
+        hb_interval = HB_FAST_EVERY if elapsed < HB_FAST_SECS else HB_SLOW_EVERY
+        if now - last_hb >= hb_interval:
+            last_hb   = now
+            remaining = None if no_limit else max(0, int(deadline - now))
+            _edit_placeholder(ph_id, lbl, elapsed, remaining, no_limit)
+
     if _cancel_event.is_set():
         _cancel_event.clear()
-        return  # Cancel handler already edited placeholder to "❌ Запрос отменён"
+        return  # cancel already handled
+
+    if timed_out:
+        msg = (f"⏱ {lbl} не ответил за {timeout_secs // 60} мин. "
+               f"Напиши «продолжай» или /retry.")
+        retry_markup = kb([[("🔄 Повторить запрос", "retry_last")]])
+        if ph_id:
+            tg_edit(ph_id, msg, retry_markup)
+        else:
+            tg_send(msg, retry_markup)
+        return
+
     reply = result_box[0] if result_box else "❌ Нет ответа"
 
     shared_ctx_add("assistant", reply, AGENT_NAMES[agent])
@@ -906,15 +959,6 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
 
     found_files = _detect_files_in_text(reply)
     file_markup = _files_keyboard(found_files) if found_files else None
-
-    is_timeout = "не ответил за" in reply or "думает >" in reply
-    if is_timeout:
-        retry_markup = kb([[("🔄 Повторить запрос", "retry_last")]])
-        if ph_id:
-            tg_edit(ph_id, f"[{lbl}]\n{reply}", retry_markup)
-        else:
-            tg_send(f"[{lbl}]\n{reply}", retry_markup)
-        return
 
     header = f"[{lbl}]\n"
     full = header + reply
