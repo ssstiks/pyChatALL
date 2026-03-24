@@ -188,6 +188,11 @@ AGENT_NAMES = {
 }
 
 
+# ── Database path - persistent SQLite storage location ──────────────
+import os
+DB_PATH = os.path.expanduser("~/.local/share/pyChatALL/pychatall.db")
+
+
 def ensure_dirs() -> None:
     """Создаёт необходимые директории если их нет."""
     import os
