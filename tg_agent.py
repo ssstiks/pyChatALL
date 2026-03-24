@@ -885,7 +885,9 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
         return
 
     result_box: list[str] = []
-    timed_out = False
+    timed_out   = False
+    cancelled   = False
+    remaining   = timeout_secs  # always initialized before loop
 
     def _worker():
         result_box.append(AGENT_FN[agent](prompt, file_path))
@@ -906,6 +908,7 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
         if _cancel_event.is_set():
             cancel_active_proc()
             t.join(3)
+            cancelled = True
             break
 
         # 2. Extend deadline
@@ -938,12 +941,15 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
             remaining = None if no_limit else max(0, int(deadline - now))
             _edit_placeholder(ph_id, lbl, elapsed, remaining, no_limit)
 
-    if _cancel_event.is_set():
+    if cancelled:
         _cancel_event.clear()
-        return  # cancel already handled
+        return
 
     if timed_out:
-        msg = (f"⏱ {lbl} не ответил за {timeout_secs // 60} мин. "
+        elapsed_total = int(time.time() - start_time)
+        e_min, e_sec = divmod(elapsed_total, 60)
+        elapsed_str = f"{e_min}м {e_sec:02d}с" if e_min else f"{e_sec}с"
+        msg = (f"⏱ {lbl} не ответил за {elapsed_str}. "
                f"Напиши «продолжай» или /retry.")
         retry_markup = kb([[("🔄 Повторить запрос", "retry_last")]])
         if ph_id:
