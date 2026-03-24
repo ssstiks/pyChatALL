@@ -5,6 +5,7 @@
 """
 
 import threading
+import pathlib
 
 # ════════════════════════════════════════
 #  TELEGRAM + АГЕНТЫ
@@ -20,7 +21,8 @@ QWEN_BIN    = "/home/stx/.nvm/versions/node/v22.20.0/bin/qwen"
 WORK_DIR    = "/home/stx/Applications/progect/shadowchat"
 
 # ── Файлы состояния ───────────────────────────────────────────
-STATE_DIR        = "/tmp/tg_agent"
+# Использование постоянного хранилища в home (сохранится при перезагрузке)
+STATE_DIR        = str(pathlib.Path.home() / ".local" / "share" / "pyChatALL")
 ACTIVE_FILE      = f"{STATE_DIR}/active_agent.txt"
 CLAUDE_SESSION   = f"{STATE_DIR}/claude_session.txt"
 CLAUDE_CTX_FILE  = f"{STATE_DIR}/claude_ctx_chars.txt"
