@@ -1213,8 +1213,9 @@ def process_update(upd: dict) -> None:
         local_path = download_tg_file(voice["file_id"], "voice.ogg")
         if not local_path:
             return  # download failed — silent skip
+        _worker_busy_at_enqueue = _worker_busy.is_set()
         _request_queue.put(("", local_path))
-        if _worker_busy.is_set() or _request_queue.qsize() > 0:
+        if _worker_busy_at_enqueue:
             tg_send("📋 В очереди (голосовое)")
         return
     elif audio:
