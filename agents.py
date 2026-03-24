@@ -435,6 +435,9 @@ def _run_passthrough(binary: str, session_file: str, agent_name: str, cmd: str) 
 
 
 # ── ОПРЕДЕЛЕНИЕ ПУТИ К БИНАРНИКУ ─────────────────────────────
+_bin_cache: dict[str, str] = {}  # agent → resolved binary path (in-process cache)
+
+
 def _find_binary(name: str) -> str | None:
     """Ищет бинарник по имени в известных путях и PATH."""
     found = shutil.which(name)
@@ -468,40 +471,57 @@ def check_agents() -> dict[str, dict]:
 
 
 def _get_effective_bin(agent: str) -> str:
-    """Возвращает актуальный путь к бинарнику агента."""
+    """Возвращает путь к бинарнику агента. Lazy: ищет при первом вызове, кэширует в памяти."""
+    if agent in _bin_cache:
+        cached = _bin_cache[agent]
+        if os.path.isfile(cached):
+            return cached
+        # Cached path no longer valid — re-discover
+        del _bin_cache[agent]
+
+    # 1. Custom path saved by user/setup
     path_file = f"{STATE_DIR}/{agent}_bin_path.txt"
     try:
         p = open(path_file).read().strip()
         if p and os.path.isfile(p):
+            _bin_cache[agent] = p
             return p
     except Exception:
         pass
+
+    # 2. Search PATH and known locations
+    bin_names = {"claude": "claude", "gemini": "gemini", "qwen": "qwen"}
+    found = _find_binary(bin_names.get(agent, agent))
+    if found:
+        _bin_cache[agent] = found
+        return found
+
+    # 3. Hardcoded default
     defaults = {"claude": CLAUDE_BIN, "gemini": GEMINI_BIN, "qwen": QWEN_BIN}
-    return defaults[agent]
+    return defaults.get(agent, agent)
 
 
 def run_startup_check() -> None:
-    """Проверяет агентов при старте, отправляет статус если что-то отсутствует."""
+    """Проверяет агентов при старте (без subprocess — только существование файла)."""
     from ui import tg_send, kb  # ленивый импорт
 
     is_first = not os.path.exists(SETUP_DONE_FILE)
-    agents = check_agents()
-    missing = [ag for ag, s in agents.items() if not s["ok"]]
 
-    for ag, info in agents.items():
-        if info["ok"] and info["path"]:
-            path_file = f"{STATE_DIR}/{ag}_bin_path.txt"
-            with open(path_file, "w") as f:
-                f.write(info["path"])
+    # Fast presence check: no subprocess, just file existence + cache warm-up
+    icons = {"claude": "🔵", "gemini": "🟢", "qwen": "🟡"}
+    status = {}
+    for ag in icons:
+        path = _get_effective_bin(ag)  # warms _bin_cache as a side effect
+        ok = os.path.isfile(path)
+        status[ag] = {"ok": ok, "path": path if ok else None}
+
+    missing = [ag for ag, s in status.items() if not s["ok"]]
 
     if is_first or missing:
-        icons = {"claude": "🔵", "gemini": "🟢", "qwen": "🟡"}
         lines = ["🤖 Статус агентов при запуске:", ""]
-        for ag, info in agents.items():
-            icon = icons[ag]
+        for ag, info in status.items():
             mark = "✅" if info["ok"] else "❌"
-            ver = f" ({info['version']})" if info["version"] else ""
-            lines.append(f"  {mark} {icon} {AGENT_NAMES[ag]}{ver}")
+            lines.append(f"  {mark} {icons[ag]} {AGENT_NAMES[ag]}")
         or_key = bool(get_openrouter_key())
         lines.append(f"  {'✅' if or_key else '⚠️'} 🌐 OpenRouter — "
                      f"{'ключ есть' if or_key else 'ключ не задан'}")
