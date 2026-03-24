@@ -1,7 +1,11 @@
 import os
+import sys
 import sqlite3
 import tempfile
 import pytest
+
+# Add parent directory to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from db_manager import Database
 
 
@@ -105,3 +109,21 @@ def test_api_keys_and_settings_with_user_id(temp_db):
     db.set_setting('active_agent', 'gemini', user_id='user2')
     assert db.get_setting('active_agent', user_id='user2') == 'gemini'
     assert db.get_setting('active_agent') == 'claude'  # Default user unaffected
+
+
+def test_detect_json_state_files():
+    """Test detection of existing JSON state files"""
+    import tempfile
+    from migrate_json_to_sqlite import detect_json_state_files
+
+    with tempfile.TemporaryDirectory() as temp_state:
+        # Create sample state files
+        open(os.path.join(temp_state, 'claude_session.txt'), 'w').close()
+        open(os.path.join(temp_state, 'shared_context.json'), 'w').close()
+        os.makedirs(os.path.join(temp_state, 'archive'), exist_ok=True)  # Should be ignored
+
+        # Test detection
+        files = detect_json_state_files(temp_state)
+        assert 'claude_session.txt' in files
+        assert 'shared_context.json' in files
+        assert 'archive' not in files  # Should skip directories like archive
