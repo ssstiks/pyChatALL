@@ -111,10 +111,12 @@ class Database:
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS api_keys (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    key_name TEXT NOT NULL UNIQUE,
+                    user_id TEXT DEFAULT 'default',
+                    key_name TEXT NOT NULL,
                     key_value TEXT NOT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, key_name)
                 )
             ''')
 
@@ -122,9 +124,11 @@ class Database:
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS settings (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_key TEXT NOT NULL UNIQUE,
+                    user_id TEXT DEFAULT 'default',
+                    user_key TEXT NOT NULL,
                     user_value TEXT NOT NULL,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, user_key)
                 )
             ''')
 
@@ -253,38 +257,38 @@ class Database:
             )
             return [dict(row) for row in cursor.fetchall()[::-1]]
 
-    def get_api_key(self, key_name):
+    def get_api_key(self, key_name, user_id='default'):
         """Get API key by name"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('SELECT key_value FROM api_keys WHERE key_name = ?', (key_name,))
+            cursor.execute('SELECT key_value FROM api_keys WHERE user_id = ? AND key_name = ?', (user_id, key_name))
             row = cursor.fetchone()
             return row[0] if row else None
 
-    def set_api_key(self, key_name, key_value):
+    def set_api_key(self, key_name, key_value, user_id='default'):
         """Save or update API key"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                '''INSERT OR REPLACE INTO api_keys (key_name, key_value)
-                   VALUES (?, ?)''',
-                (key_name, key_value)
+                '''INSERT OR REPLACE INTO api_keys (user_id, key_name, key_value)
+                   VALUES (?, ?, ?)''',
+                (user_id, key_name, key_value)
             )
 
-    def get_setting(self, key):
+    def get_setting(self, key, user_id='default'):
         """Get setting value"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('SELECT user_value FROM settings WHERE user_key = ?', (key,))
+            cursor.execute('SELECT user_value FROM settings WHERE user_id = ? AND user_key = ?', (user_id, key))
             row = cursor.fetchone()
             return row[0] if row else None
 
-    def set_setting(self, key, value):
+    def set_setting(self, key, value, user_id='default'):
         """Save setting"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                '''INSERT OR REPLACE INTO settings (user_key, user_value)
-                   VALUES (?, ?)''',
-                (key, str(value))
+                '''INSERT OR REPLACE INTO settings (user_id, user_key, user_value)
+                   VALUES (?, ?, ?)''',
+                (user_id, key, str(value))
             )
