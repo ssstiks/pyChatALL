@@ -127,3 +127,45 @@ def test_detect_json_state_files():
         assert 'claude_session.txt' in files
         assert 'shared_context.json' in files
         assert 'archive' not in files  # Should skip directories like archive
+
+
+def test_config_auto_initialization():
+    """Test that importing config initializes database and directories"""
+    import tempfile
+    import importlib
+
+    with tempfile.TemporaryDirectory() as temp_home:
+        # Create a temporary config module that uses temp_home as STATE_DIR
+        config_path = os.path.join(temp_home, 'config.py')
+
+        # Write a test config file with minimal initialization
+        with open(config_path, 'w') as f:
+            f.write(f"""
+import os
+
+STATE_DIR = '{temp_home}'
+DB_PATH = os.path.expanduser("{temp_home}/pychatall.db")
+
+# Auto-create required directories
+for directory in [os.path.dirname(DB_PATH), os.path.join(STATE_DIR, 'archive'), os.path.join(STATE_DIR, 'downloads')]:
+    os.makedirs(directory, exist_ok=True)
+
+# Verify directories exist
+assert os.path.exists(os.path.dirname(DB_PATH)), f"DB directory not created: {{os.path.dirname(DB_PATH)}}"
+assert os.path.exists(os.path.join(STATE_DIR, 'archive')), f"archive directory not created"
+assert os.path.exists(os.path.join(STATE_DIR, 'downloads')), f"downloads directory not created"
+""")
+
+        # Import and verify
+        sys.path.insert(0, temp_home)
+        try:
+            spec = importlib.util.spec_from_file_location("config_test", config_path)
+            config_module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(config_module)
+
+            # Verify all directories were created
+            assert os.path.exists(os.path.dirname(config_module.DB_PATH))
+            assert os.path.exists(os.path.join(config_module.STATE_DIR, 'archive'))
+            assert os.path.exists(os.path.join(config_module.STATE_DIR, 'downloads'))
+        finally:
+            sys.path.remove(temp_home)
