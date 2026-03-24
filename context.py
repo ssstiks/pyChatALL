@@ -34,22 +34,20 @@ db = Database(DB_PATH)
 
 # ── МОДЕЛИ ───────────────────────────────────────────────────
 def get_model(agent: str) -> str:
-    path = MODEL_FILES.get(agent)
-    if not path:
-        return DEFAULT_MODELS.get(agent, "")
+    """Get selected model for agent from database."""
     try:
-        with open(path) as f:
-            m = f.read().strip()
-            return m if m else DEFAULT_MODELS.get(agent, "")
-    except FileNotFoundError:
+        m = db.get_model(agent)
+        return m if m else DEFAULT_MODELS.get(agent, "")
+    except Exception:
         return DEFAULT_MODELS.get(agent, "")
 
 
 def set_model(agent: str, model: str) -> None:
-    path = MODEL_FILES.get(agent)
-    if path:
-        with open(path, "w") as f:
-            f.write(model)
+    """Set selected model for agent in database."""
+    try:
+        db.set_model(agent, model)
+    except Exception as e:
+        log_error(f"Failed to set model for {agent}: {e}")
 
 
 def agent_label(agent: str) -> str:
@@ -88,38 +86,78 @@ def cmd_model(agent: str, arg: str) -> str:
 
 # ── СЕССИИ CLI-АГЕНТОВ ───────────────────────────────────────
 def _load_session(path: str) -> str | None:
+    """Load session from database by extracting agent name from path."""
     try:
-        with open(path) as f:
-            s = f.read().strip()
-            return s if s else None
+        # Extract agent name from path (e.g., "...claude_session.txt" -> "claude")
+        agent = _extract_agent_from_path(path)
+        if agent:
+            return db.get_session(agent)
+        return None
     except Exception:
         return None
 
 
 def _save_session(path: str, sid: str) -> None:
-    with open(path, "w") as f:
-        f.write(sid)
+    """Save session to database by extracting agent name from path."""
+    try:
+        # Extract agent name from path (e.g., "...claude_session.txt" -> "claude")
+        agent = _extract_agent_from_path(path)
+        if agent:
+            db.save_session(agent, sid)
+    except Exception as e:
+        log_error(f"Failed to save session: {e}")
+
+
+def _extract_agent_from_path(path: str) -> str | None:
+    """Extract agent name from session/context file paths."""
+    if "claude" in path:
+        return "claude"
+    elif "gemini" in path:
+        return "gemini"
+    elif "qwen" in path:
+        return "qwen"
+    elif "openrouter" in path:
+        return "openrouter"
+    return None
 
 
 def _get_ctx(path: str) -> int:
+    """Get context character count from database by extracting agent name from path."""
     try:
-        with open(path) as f:
-            return int(f.read().strip())
+        agent = _extract_agent_from_path(path)
+        if agent:
+            return db.get_context_usage(agent)
+        return 0
     except Exception:
         return 0
 
 
 def _add_ctx(path: str, chars: int) -> int:
-    total = _get_ctx(path) + chars
-    with open(path, "w") as f:
-        f.write(str(total))
-    return total
+    """Add context characters to database and return total."""
+    try:
+        agent = _extract_agent_from_path(path)
+        if agent:
+            total = db.get_context_usage(agent) + chars
+            db.update_context_usage(agent, total)
+            return total
+        return 0
+    except Exception as e:
+        log_error(f"Failed to add context: {e}")
+        return 0
 
 
 def _reset_session(session_file: str, ctx_file: str) -> None:
-    for p in (session_file, ctx_file):
-        if os.path.exists(p):
-            os.remove(p)
+    """Reset session and context for an agent."""
+    try:
+        agent = _extract_agent_from_path(session_file)
+        if agent:
+            # Save empty session and zero context to database
+            db.save_session(agent, "")
+            db.update_context_usage(agent, 0)
+            # Also archive the old session
+            db.archive_session(agent)
+    except Exception as e:
+        log_error(f"Failed to reset session: {e}")
 
 
 # ── АКТИВНЫЙ АГЕНТ ───────────────────────────────────────────
