@@ -163,10 +163,9 @@ def _reset_session(session_file: str, ctx_file: str) -> None:
 # ── АКТИВНЫЙ АГЕНТ ───────────────────────────────────────────
 def get_active() -> str:
     try:
-        with open(ACTIVE_FILE) as f:
-            a = f.read().strip()
-            if a in ("claude", "openrouter", "gemini", "qwen"):
-                return a
+        a = db.get_setting('active_agent') or 'claude'
+        if a in ("claude", "openrouter", "gemini", "qwen"):
+            return a
     except Exception:
         pass
     return "claude"
@@ -174,8 +173,7 @@ def get_active() -> str:
 
 def set_active(agent: str) -> None:
     prev = get_active()
-    with open(ACTIVE_FILE, "w") as f:
-        f.write(agent)
+    db.set_setting('active_agent', agent)
     if agent != prev:
         # Ленивый импорт для избежания кругового импорта (context ← ui ← context)
         import ui
@@ -328,19 +326,20 @@ def shared_ctx_for_api() -> list:
 def claude_rate_set(seconds: int) -> None:
     """Записывает время снятия лимита (unix timestamp)."""
     until = time.time() + seconds
-    with open(CLAUDE_RATE_FILE, "w") as f:
-        f.write(str(until))
+    db.set_setting('claude_rate_until', str(until))
     log_warn(f"Claude rate limit: доступен через {seconds // 3600}ч {(seconds % 3600) // 60}м")
 
 
 def claude_rate_until() -> float | None:
     """Возвращает timestamp снятия лимита или None если лимита нет."""
     try:
-        until = float(open(CLAUDE_RATE_FILE).read().strip())
-        if until > time.time():
-            return until
-        os.remove(CLAUDE_RATE_FILE)
-    except (FileNotFoundError, ValueError):
+        until_str = db.get_setting('claude_rate_until')
+        if until_str:
+            until = float(until_str)
+            if until > time.time():
+                return until
+            db.set_setting('claude_rate_until', None)
+    except (ValueError, TypeError):
         pass
     return None
 
