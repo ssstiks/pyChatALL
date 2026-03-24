@@ -198,3 +198,38 @@ def ensure_dirs() -> None:
     import os
     for d in (STATE_DIR, ARCHIVE_DIR, DOWNLOAD_DIR, WORKSPACE_DL_DIR):
         os.makedirs(d, exist_ok=True)
+
+
+# ============================================================================
+# Auto-initialization: Create directories and database on import
+# ============================================================================
+
+# Create required directories
+for directory in [
+    os.path.dirname(DB_PATH),
+    ARCHIVE_DIR,
+    DOWNLOAD_DIR,
+]:
+    os.makedirs(directory, exist_ok=True)
+
+# Auto-initialize SQLite database if it doesn't exist
+if not os.path.exists(DB_PATH):
+    print(f"[CONFIG] Creating new SQLite database at {DB_PATH}")
+    try:
+        from db_manager import Database
+        db = Database(DB_PATH)
+        db.initialize()
+        print(f"[CONFIG] Database initialized successfully")
+
+        # Run one-time migration if JSON files exist
+        print(f"[CONFIG] Checking for legacy state files...")
+        from migrate_json_to_sqlite import migrate_json_to_sqlite
+        if migrate_json_to_sqlite():
+            print(f"[CONFIG] Initialization complete")
+        else:
+            print(f"[CONFIG] Initialization complete (no legacy files to migrate)")
+    except Exception as e:
+        print(f"[CONFIG] Warning: Could not auto-initialize database: {e}")
+else:
+    # Database exists, just ensure directories are in place
+    ensure_dirs()
