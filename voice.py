@@ -4,7 +4,6 @@ Voice message transcription using OpenAI Whisper.
 No imports from project modules — stdlib + optional third-party only.
 """
 import importlib
-import importlib.util
 import os
 import shutil
 import subprocess
@@ -39,7 +38,10 @@ def _ensure_whisper():
             f"{proc.stderr.decode()[:200]}"
         )
     importlib.invalidate_caches()
-    import whisper as _w
+    try:
+        import whisper as _w
+    except ImportError as e:
+        raise RuntimeError(f"openai-whisper installed but import failed: {e}") from e
     _whisper_mod = _w
     return _whisper_mod
 

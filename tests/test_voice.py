@@ -74,11 +74,17 @@ def test_ensure_whisper_pip_fails():
     proc.returncode = 1
     proc.stderr = b"ERROR: Could not find a version"
 
+    original = sys.modules.get("whisper")
     sys.modules.pop("whisper", None)
-
-    with mock.patch("subprocess.run", return_value=proc):
-        with pytest.raises(RuntimeError, match="pip install openai-whisper failed"):
-            voice._ensure_whisper()
+    try:
+        with mock.patch("subprocess.run", return_value=proc):
+            with pytest.raises(RuntimeError, match="pip install openai-whisper failed"):
+                voice._ensure_whisper()
+    finally:
+        if original is not None:
+            sys.modules["whisper"] = original
+        else:
+            sys.modules.pop("whisper", None)
 
 
 # ── transcribe_voice ──────────────────────────────────────────
