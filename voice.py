@@ -29,7 +29,8 @@ def _ensure_whisper():
         pass
 
     proc = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "openai-whisper", "-q"],
+        [sys.executable, "-m", "pip", "install", "openai-whisper", "-q",
+         "--break-system-packages"],
         capture_output=True,
     )
     if proc.returncode != 0:
