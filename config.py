@@ -1,4 +1,4 @@
-YOUR_BOT_TOKEN_HEREusr/bin/env python3
+#!/usr/bin/env python3
 """
 Глобальные константы и конфигурация tg_agent.
 Не импортирует ничего из других модулей проекта.
@@ -11,7 +11,7 @@ import pathlib
 # ════════════════════════════════════════
 #  TELEGRAM + АГЕНТЫ
 # ════════════════════════════════════════
-BOT_TOKEN    = os.getenv("BOT_TOKEN", "fallback-dev-token")
+BOT_TOKEN    = os.getenv("TG_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 ALLOWED_CHAT = YOUR_TELEGRAM_ID
 
 OPENROUTER_API_KEY = ""  # fallback если нет файла; лучше задать через бот
