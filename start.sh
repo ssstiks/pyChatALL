@@ -90,6 +90,14 @@ case "${1:-start}" in
             fi
         fi
 
+        # Пробрасываем proxy-переменные если nekobox/другой прокси слушает на 2080
+        if ss -tlnp 2>/dev/null | grep -q ':2080'; then
+            export HTTP_PROXY=http://127.0.0.1:2080
+            export HTTPS_PROXY=http://127.0.0.1:2080
+            export NO_PROXY=localhost,127.0.0.1
+            echo "   Proxy: 127.0.0.1:2080 (обнаружен)"
+        fi
+
         echo "Запускаю бота..."
         nohup $PYTHON "$BOT_SCRIPT" >> "$LOG_FILE" 2>&1 &
         BGPID=$!

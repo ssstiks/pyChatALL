@@ -1538,18 +1538,24 @@ async def _async_main() -> None:
     log_info(f"=== tg_agent запущен === PID={os.getpid()}")
     log_info(f"Active agent: {get_active()} | Work dir: {WORK_DIR}")
 
-    tg_send("🤖 Мультиагент запущен! Используй /menu для управления.")
-    tg_set_keyboard()
-
-    # Start background task: startup check in thread pool (non-blocking)
-    asyncio.create_task(asyncio.to_thread(run_startup_check))
     # Start async queue worker
     asyncio.create_task(_queue_worker())
-    send_agent_menu()
 
-    # Telegram polling runs in a thread executor (blocking HTTP long-poll)
+    # Telegram polling + startup messages run in the thread executor.
+    # tg_send/tg_set_keyboard use blocking requests — must NOT be called
+    # directly on the event loop.
     loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, _polling_loop)
+    await loop.run_in_executor(None, _startup_and_poll)
+
+
+def _startup_and_poll() -> None:
+    """Send startup messages then enter the polling loop (runs in thread executor)."""
+    # create_task must be scheduled on the event loop from a thread
+    async_core.call_soon(lambda: asyncio.ensure_future(asyncio.to_thread(run_startup_check)))
+    tg_send("🤖 Мультиагент запущен! Используй /menu для управления.")
+    tg_set_keyboard()
+    send_agent_menu()
+    _polling_loop()
 
 
 def _polling_loop() -> None:
