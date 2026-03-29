@@ -4,6 +4,7 @@ AI-бэкенды: Claude, Gemini, Qwen, OpenRouter.
 Subprocess-обёртки, парсинг JSON, fallback-логика Gemini, поиск бинарников.
 """
 
+import asyncio
 import json
 import mimetypes
 import os
@@ -778,3 +779,22 @@ def _or_model_label(m: dict, current: str) -> str:
     mark = "✓ " if mid == current else ""
     label = f"{mark}{name[:28]}{price_str}"
     return label
+
+
+# ── Async wrappers (asyncio.to_thread, no new OS threads) ────────────────────
+
+async def async_ask_claude(prompt: str, file_path: str | None = None) -> str:
+    """Async wrapper — runs ask_claude in the default thread pool."""
+    return await asyncio.to_thread(ask_claude, prompt, file_path)
+
+
+async def async_ask_gemini(prompt: str, file_path: str | None = None) -> str:
+    return await asyncio.to_thread(ask_gemini, prompt, file_path)
+
+
+async def async_ask_qwen(prompt: str, file_path: str | None = None) -> str:
+    return await asyncio.to_thread(ask_qwen, prompt, file_path)
+
+
+async def async_ask_openrouter(prompt: str, file_path: str | None = None) -> str:
+    return await asyncio.to_thread(ask_openrouter, prompt, file_path)

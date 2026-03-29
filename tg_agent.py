@@ -21,6 +21,7 @@
 
 # ── Импорты из модулей проекта ───────────────────────────────
 # Все символы доступны через этот модуль (backward-compat для team_mode.py).
+import asyncio
 import atexit
 import glob as glob_mod
 import json
@@ -29,6 +30,8 @@ import queue
 import subprocess
 import threading
 import time
+
+import async_core
 
 import requests
 
@@ -90,12 +93,12 @@ import voice as _voice_mod
 import translator
 from memory_manager import get_memory_manager
 
-_request_queue: "queue.Queue[tuple[str, str | None]]" = queue.Queue()
-_cancel_event = threading.Event()
-_worker_busy = threading.Event()
+_request_queue: asyncio.Queue  # initialised in _async_main() inside event loop
+_cancel_event: asyncio.Event      # initialised in _async_main()
+_worker_busy = threading.Event()  # kept as threading.Event — read from polling thread
 _timeout_extend_count = 0               # incremented per "+5 мин" press
 _timeout_extend_lock  = threading.Lock()
-_no_timeout_event     = threading.Event()
+_no_timeout_event: asyncio.Event  # initialised in _async_main()
 
 # Mutable _last_request (из config — изменяем здесь)
 _last_request: dict = {}
@@ -440,29 +443,32 @@ def send_to_agent(agent: str, prompt: str, file_path: str | None = None) -> None
 
 
 # ── ОЧЕРЕДЬ ЗАПРОСОВ ──────────────────────────────────────────
-def _queue_worker() -> None:
-    """Persistent daemon thread. Processes one request at a time."""
+async def _queue_worker() -> None:
+    """Async queue worker — replaces the threading.Thread queue worker."""
     while True:
         try:
-            item = _request_queue.get(timeout=1)
-        except queue.Empty:
-            continue
-        try:
-            # Discard items dequeued during a cancel window.
-            # _cancel_event is cleared HERE on the discard path only.
-            # On the non-cancel path, route_and_reply clears it at the
-            # commit point (after placeholder is sent).
-            if _cancel_event.is_set():
-                _cancel_event.clear()
-                continue
-            _worker_busy.set()
-            text, file_path = item
+            item = await _request_queue.get()
             try:
-                route_and_reply(text, file_path)
+                # Discard items dequeued during a cancel window.
+                # _cancel_event is cleared HERE on the discard path only.
+                # On the non-cancel path, route_and_reply clears it at the
+                # commit point (after placeholder is sent).
+                if _cancel_event.is_set():
+                    _cancel_event.clear()
+                    continue
+                _worker_busy.set()
+                text, file_path = item
+                try:
+                    await asyncio.to_thread(route_and_reply, text, file_path)
+                finally:
+                    _worker_busy.clear()
             finally:
-                _worker_busy.clear()
-        finally:
-            _request_queue.task_done()
+                _request_queue.task_done()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            log_error("Queue worker outer error", e)
+            await asyncio.sleep(1)
 
 
 # ── TIMEOUT / HEARTBEAT HELPERS ──────────────────────────────
@@ -1107,13 +1113,19 @@ def handle_callback(cb: dict) -> None:
     if data == "cancel_current":
         tg_answer_cb(cb_id, "❌ Отменяю...")
         cancel_active_proc()
-        _cancel_event.set()
-        while not _request_queue.empty():
-            try:
-                _request_queue.get_nowait()
-                _request_queue.task_done()
-            except queue.Empty:
-                break
+        # asyncio.Event.set() is not thread-safe — schedule on the event loop
+        async_core.call_soon(_cancel_event.set)
+
+        def _drain_queue():
+            """Drain pending queue items on the event loop thread."""
+            while True:
+                try:
+                    _request_queue.get_nowait()
+                    _request_queue.task_done()
+                except asyncio.QueueEmpty:
+                    break
+
+        async_core.call_soon(_drain_queue)
         if msg_id:
             tg_edit(msg_id, "❌ Запрос отменён")
         return
@@ -1141,7 +1153,8 @@ def handle_callback(cb: dict) -> None:
 
     elif data == "no_timeout":
         if _worker_busy.is_set():
-            _no_timeout_event.set()
+            # asyncio.Event.set() is not thread-safe — schedule on the event loop
+            async_core.call_soon(_no_timeout_event.set)
             tg_answer_cb(cb_id, "∞ Таймаут снят")
         else:
             tg_answer_cb(cb_id, "Нет активного запроса")
@@ -1471,7 +1484,7 @@ def process_update(upd: dict) -> None:
         if not local_path:
             return  # download failed — silent skip
         _worker_busy_at_enqueue = _worker_busy.is_set()
-        _request_queue.put(("", local_path))
+        async_core.call_soon(_request_queue.put_nowait, ("", local_path))
         if _worker_busy_at_enqueue:
             tg_send("📋 В очереди (голосовое)")
         return
@@ -1493,7 +1506,7 @@ def process_update(upd: dict) -> None:
         return
 
     qsize_before = _request_queue.qsize()
-    _request_queue.put((prompt_text or "", file_path))
+    async_core.call_soon(_request_queue.put_nowait, (prompt_text or "", file_path))
     if _worker_busy.is_set() or qsize_before > 0:
         pos = qsize_before + 1
         tg_send(f"📋 В очереди (позиция {pos})")
@@ -1504,6 +1517,20 @@ def main() -> None:
     ensure_dirs()
     _setup_logging()
     _check_single_instance()
+    asyncio.run(_async_main())
+
+
+async def _async_main() -> None:
+    global _request_queue, _cancel_event, _no_timeout_event
+
+    # Initialise async primitives inside the running event loop
+    _request_queue    = asyncio.Queue()
+    _cancel_event     = asyncio.Event()
+    _no_timeout_event = asyncio.Event()
+
+    # Register this loop so the polling thread can submit work
+    async_core.set_loop(asyncio.get_running_loop())
+
     from config import ensure_db
     ensure_db()
     threading.excepthook = _thread_excepthook
@@ -1511,14 +1538,24 @@ def main() -> None:
     log_info(f"=== tg_agent запущен === PID={os.getpid()}")
     log_info(f"Active agent: {get_active()} | Work dir: {WORK_DIR}")
 
-    offset = None
     tg_send("🤖 Мультиагент запущен! Используй /menu для управления.")
     tg_set_keyboard()
-    threading.Thread(target=run_startup_check, daemon=True).start()
-    threading.Thread(target=_queue_worker, daemon=True, name="queue-worker").start()
+
+    # Start background task: startup check in thread pool (non-blocking)
+    asyncio.create_task(asyncio.to_thread(run_startup_check))
+    # Start async queue worker
+    asyncio.create_task(_queue_worker())
     send_agent_menu()
 
+    # Telegram polling runs in a thread executor (blocking HTTP long-poll)
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _polling_loop)
+
+
+def _polling_loop() -> None:
+    """Blocking Telegram long-poll loop — runs in thread executor."""
     poll_errors = 0
+    offset = None
     while True:
         try:
             params = {"timeout": 30, "allowed_updates": [
@@ -1545,7 +1582,7 @@ def main() -> None:
             log_warn(f"Network error #{poll_errors}: {e}")
             time.sleep(min(5 * poll_errors, 30))
         except Exception as e:
-            log_error("Main loop exception", e)
+            log_error("Poll loop exception", e)
             time.sleep(5)
 
 
