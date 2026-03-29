@@ -28,24 +28,32 @@ class Database:
 
     @contextmanager
     def get_connection(self):
-        """Context manager for database connections"""
+        """Context manager for database connections.
+
+        journal_mode=WAL is set once in initialize() and persists on the DB file.
+        Only per-session PRAGMAs are set here on every connection.
+        """
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA foreign_keys=ON")
         try:
             yield conn
             conn.commit()
-        except sqlite3.DatabaseError as e:
+        except sqlite3.DatabaseError:
             conn.rollback()
-            raise  # Re-raise to let caller handle
-        except Exception as e:
+            raise
+        except Exception:
             conn.rollback()
-            raise  # Unexpected error - still rollback but re-raise
+            raise
         finally:
             conn.close()
 
     def initialize(self):
         """Create all required tables if they don't exist"""
         with self.get_connection() as conn:
+            # WAL mode persists on the DB file — set once here, not per-connection
+            conn.execute("PRAGMA journal_mode=WAL")
             cursor = conn.cursor()
 
             # Sessions table
@@ -132,6 +140,26 @@ class Database:
                     user_value TEXT NOT NULL,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(user_id, user_key)
+                )
+            ''')
+
+            # Lessons learned — self-learning knowledge base
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS knowledge_base (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_name TEXT NOT NULL DEFAULT 'general',
+                    error_summary TEXT NOT NULL,
+                    fix_steps TEXT NOT NULL,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # Usage log for heuristic rate limiting
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS usage_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent TEXT NOT NULL,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
 
@@ -268,16 +296,18 @@ class Database:
             )
 
     def get_recent_messages(self, limit=6, user_id='default'):
-        """Get last N messages for context"""
+        """Get last N messages for context in chronological order."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                '''SELECT role, agent, content FROM messages
-                   WHERE user_id = ?
-                   ORDER BY timestamp DESC LIMIT ?''',
+                '''SELECT role, agent, content, timestamp FROM (
+                       SELECT id, role, agent, content, timestamp FROM messages
+                       WHERE user_id = ?
+                       ORDER BY id DESC LIMIT ?
+                   ) ORDER BY id ASC''',
                 (user_id, limit)
             )
-            return [dict(row) for row in cursor.fetchall()[::-1]]
+            return [dict(row) for row in cursor.fetchall()]
 
     def get_api_key(self, key_name, user_id='default'):
         """Get API key by name"""
@@ -314,3 +344,45 @@ class Database:
                    VALUES (?, ?, ?)''',
                 (user_id, key, str(value))
             )
+
+    # ── Knowledge Base (Lessons Learned) ─────────────────────────────────────
+
+    def add_lesson(self, project_name: str, error_summary: str, fix_steps: str) -> None:
+        """Store a new lesson in the knowledge base."""
+        with self.get_connection() as conn:
+            conn.execute(
+                '''INSERT INTO knowledge_base (project_name, error_summary, fix_steps)
+                   VALUES (?, ?, ?)''',
+                (project_name.strip().lower(), error_summary[:300], fix_steps[:500]),
+            )
+
+    def get_lessons(self, project_name: str | None = None, limit: int = 5) -> list[dict]:
+        """Retrieve lessons, optionally filtered by project name."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            if project_name:
+                cursor.execute(
+                    '''SELECT project_name, error_summary, fix_steps, timestamp
+                       FROM knowledge_base
+                       WHERE project_name = ?
+                       ORDER BY timestamp DESC LIMIT ?''',
+                    (project_name.strip().lower(), limit),
+                )
+            else:
+                cursor.execute(
+                    '''SELECT project_name, error_summary, fix_steps, timestamp
+                       FROM knowledge_base
+                       ORDER BY timestamp DESC LIMIT ?''',
+                    (limit,),
+                )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def lesson_exists(self, error_summary: str) -> bool:
+        """Check if a lesson with the same summary already exists (dedup)."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                'SELECT 1 FROM knowledge_base WHERE error_summary = ? LIMIT 1',
+                (error_summary[:300],),
+            )
+            return cursor.fetchone() is not None

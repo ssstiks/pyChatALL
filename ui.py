@@ -142,6 +142,12 @@ for _ag, _lbl in _KB_AGENT_LABELS.items():
 
 
 def _build_reply_keyboard(active: str) -> dict:
+    import rate_tracker
+    limit_info = rate_tracker.get_display(active)
+    placeholder = f"Активный: {_KB_AGENT_LABELS[active]}"
+    if limit_info:
+        placeholder += f" | {limit_info}"
+
     def agent_btn(ag: str) -> str:
         lbl = _KB_AGENT_LABELS[ag]
         return f"▶ {lbl}" if ag == active else lbl
@@ -151,11 +157,11 @@ def _build_reply_keyboard(active: str) -> dict:
             [agent_btn("claude"), agent_btn("gemini"),
              agent_btn("qwen"),   agent_btn("openrouter")],
             ["📋 /menu", "🔀 /all", "💬 /discuss", "📁 /files"],
-            ["📊 /ctx", "🔧 /setup", "🧠 /memory", "❓ /help"],
+            ["📊 /ctx", "📊 /limits", "🔧 /setup", "🧠 /memory"],
         ],
         "resize_keyboard":   True,
         "is_persistent":     True,
-        "input_field_placeholder": f"Активный: {_KB_AGENT_LABELS[active]}",
+        "input_field_placeholder": placeholder,
     }
 
 
@@ -320,14 +326,17 @@ def kb(buttons: list[list[tuple[str, str]]]) -> dict:
 
 
 def send_agent_menu() -> None:
-    """Меню выбора агента с текущей моделью."""
+    """Меню выбора агента с текущей моделью и лимитами."""
+    import rate_tracker
     active = get_active()
     m_active = get_model(active) if active != "openrouter" else "API"
     lines = [f"🤖 Активный: {AGENT_NAMES[active]} ({m_active})", ""]
     for ag in ("claude", "gemini", "qwen", "openrouter"):
         mark = "▶" if ag == active else " "
         m = get_model(ag) if ag != "openrouter" else "API"
-        lines.append(f"  {mark} {AGENT_NAMES[ag]} ({m})")
+        limit_str = rate_tracker.get_display(ag)
+        limit_info = f" — {limit_str}" if limit_str else ""
+        lines.append(f"  {mark} {AGENT_NAMES[ag]} ({m}){limit_info}")
 
     buttons = [
         [("🔵 Claude", "agent:claude"),    ("🟢 Gemini",     "agent:gemini")],

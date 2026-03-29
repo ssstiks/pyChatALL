@@ -193,9 +193,9 @@ def test_full_workflow(temp_db):
     db.add_message('assistant', 'Hi there', agent='claude')
     messages = db.get_recent_messages(limit=2)
     assert len(messages) == 2
-    # Messages are returned in reverse insertion order due to DESC+reversal
-    assert messages[0]['content'] == 'Hi there'
-    assert messages[1]['content'] == 'Hello'
+    # Messages are returned in chronological (insertion) order
+    assert messages[0]['content'] == 'Hello'
+    assert messages[1]['content'] == 'Hi there'
 
     # Save memory
     memory = {'user_profile': {'name': 'Alex'}, 'project_state': {}}

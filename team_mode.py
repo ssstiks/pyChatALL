@@ -18,6 +18,10 @@ import threading
 import time
 
 import tg_agent as _bot
+from config import DB_PATH
+from db_manager import Database as _Database
+
+_db = _Database(DB_PATH)
 
 # ── ДИРЕКТОРИИ ──────────────────────────────────────────────────
 PROJECTS_DIR    = os.path.join(_bot.WORK_DIR, "projects")   # все проекты здесь
@@ -140,8 +144,10 @@ def _load_state() -> dict:
 def _save_state(s: dict):
     os.makedirs(TEAM_DIR, exist_ok=True)
     s["updated_at"] = time.strftime("%H:%M:%S")
-    with open(STATE_FILE, "w") as f:
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(s, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, STATE_FILE)
 
 
 def _set_phase(phase: str, extra: dict | None = None):
@@ -162,50 +168,18 @@ _BINS = {"claude": _bot.CLAUDE_BIN, "gemini": _bot.GEMINI_BIN, "qwen": _bot.QWEN
 
 
 def _parse_cli_output(raw: str) -> str:
-    if not raw:
-        return ""
-    try:
-        data = json.loads(raw)
-        if isinstance(data, list):
-            for item in data:
-                if isinstance(item, dict) and item.get("type") == "result":
-                    return item.get("result") or raw
-            for item in reversed(data):
-                if isinstance(item, dict) and item.get("type") == "assistant":
-                    for block in item.get("message", {}).get("content", []):
-                        if isinstance(block, dict) and block.get("type") == "text":
-                            return block["text"]
-        elif isinstance(data, dict):
-            return data.get("result") or data.get("response") or data.get("text") or raw
-    except Exception:
-        pass
-    return raw
-
-
-def _is_mostly_cyrillic(text: str) -> bool:
-    """Check if text contains significant Cyrillic (Russian)."""
-    if not text:
-        return False
-    cyrillic = sum(1 for c in text if '\u0400' <= c <= '\u04ff')
-    return cyrillic > len(text) * 0.15
+    """Parse CLI JSON output — delegates to agents module."""
+    from agents import _parse_cli_output as _agents_parse
+    return _agents_parse(raw, "")
 
 
 def _translate_to_en(text: str) -> str:
-    """Translate Russian text to English using Gemini flash-lite (cheap/fast)."""
-    if not text or not _is_mostly_cyrillic(text):
+    """Translate Russian text to English — delegates to translator module."""
+    import translator as _tr
+    cyrillic = sum(1 for c in text if '\u0400' <= c <= '\u04ff') if text else 0
+    if not text or cyrillic <= len(text) * 0.15:
         return text
-    import subprocess
-    binary = _bot.GEMINI_BIN
-    prompt = f"Translate to English. Output ONLY the translation, no explanations, no quotes:\n{text}"
-    cmd = [binary, "--output-format", "json", "--yolo",
-           "--model", "gemini-2.5-flash-lite", "--prompt", prompt]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True,
-                                timeout=30, cwd=_bot.WORK_DIR)
-        translated = _parse_cli_output(result.stdout.strip())
-        return translated.strip() or text
-    except Exception:
-        return text  # fallback if translation fails
+    return _tr.translate_to_en(text)
 
 
 def _call_agent(agent: str, prompt: str, timeout: int = 300) -> str:
@@ -353,11 +327,99 @@ def _project_context() -> str:
         return ""
 
 
+# ── SHARED EXPERIENCE ───────────────────────────────────────────
+
+def store_experience(issue: str, fix: str, project: str = "") -> None:
+    """Store a Debugger-confirmed fix into the shared knowledge base."""
+    try:
+        proj = (project or _cur_project() or "general").strip().lower()
+        issue_clean = issue.strip()[:300]
+        fix_clean   = fix.strip()[:500]
+        if issue_clean and fix_clean and not _db.lesson_exists(issue_clean):
+            _db.add_lesson(proj, issue_clean, fix_clean)
+    except Exception as e:
+        _team_log(f"⚠️ store_experience failed: {e}")
+
+
+def _get_past_lessons(project: str = "", limit: int = 3) -> str:
+    """Return a formatted 'Avoid these past mistakes' block for agent prompts."""
+    try:
+        proj = (project or _cur_project() or "").strip().lower()
+        rows = _db.get_lessons(project_name=proj, limit=limit) if proj else []
+        if not rows:
+            rows = _db.get_lessons(limit=limit)
+        if not rows:
+            return ""
+        lines = ["[PAST MISTAKES — avoid repeating these errors:"]
+        for r in rows:
+            lines.append(f"  • Problem: {r['error_summary']} → Fix: {r['fix_steps']}")
+        lines.append("]")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
+def _sanitize_for_agent(text: str, max_chars: int = 300) -> str:
+    """Remove raw CLI traces / hex dumps from agent output; truncate to max_chars.
+
+    Used to prevent Planner/Coder from seeing noisy terminal output.
+    """
+    import re as _re
+    # Drop lines that look like raw hex dumps or pure log prefixes
+    _noise = _re.compile(
+        r'^\s*([\da-f]{2}[\s:]){6,}'          # hex dump lines
+        r'|^\s*[\[{<][A-Z]+[\]}>][\s:]'        # bare [LEVEL]: log lines
+        r'|^\s*(\\x[\da-f]{2}){4,}',           # escaped bytes
+        _re.IGNORECASE,
+    )
+    clean_lines = [ln for ln in text.splitlines() if not _noise.match(ln)]
+    clean = "\n".join(clean_lines).strip()
+    if len(clean) > max_chars:
+        clean = clean[:max_chars] + " ...[truncated]"
+    return clean
+
+
+def _skill_style() -> str:
+    """Return a code-style instruction derived from user's skill_level.
+
+    Injected at the top of every agent system prompt for consistent output.
+    """
+    try:
+        from memory_manager import get_memory_manager
+        mem   = get_memory_manager().load()
+        level = mem.get("user_profile", {}).get("skill_level", "unknown")
+    except Exception:
+        level = "unknown"
+
+    mapping = {
+        "expert":       "USER EXPERTISE: Expert. Minimal inline comments. No hand-holding. "
+                        "Prefer concise code over verbose explanations.",
+        "intermediate": "USER EXPERTISE: Intermediate. Brief comments on non-obvious logic only.",
+        "beginner":     "USER EXPERTISE: Beginner. Add clear comments to every function. "
+                        "Explain WHY, not just what. Use simple variable names.",
+    }
+    return mapping.get(level, "")   # unknown → no injection, don't bias agents
+
+
 # ── PROMPTS ─────────────────────────────────────────────────────
 def _planner_prompt(task: str) -> str:
     ctx      = _project_context()
     proj_dir = _project_dir()
-    return f"""You are PLANNER in an AI agent team. Working dir: {proj_dir}{ctx}
+    lessons  = _get_past_lessons()
+    skill    = _skill_style()
+
+    skill_block   = f"\n{skill}\n" if skill else ""
+    lessons_block = f"\n{lessons}\n" if lessons else ""
+
+    # Inject structured memory (user profile + short_term_context from Shadow Librarian)
+    mem_block = ""
+    try:
+        from memory_manager import get_memory_manager
+        mem_block = "\n" + get_memory_manager().to_prompt_block() + "\n"
+    except Exception:
+        pass
+
+    return f"""You are PLANNER in an AI agent team. Working dir: {proj_dir}{mem_block}{skill_block}{lessons_block}{ctx}
 
 TASK: {task}
 
@@ -389,7 +451,9 @@ IMPORTANT: Plan only, no implementation. Save file."""
 def _coder_prompt() -> str:
     ctx      = _project_context()
     proj_dir = _project_dir()
-    return f"""You are CODER. Working dir: {proj_dir}{ctx}
+    skill    = _skill_style()
+    skill_block = f"\n{skill}\n" if skill else ""
+    return f"""You are CODER. Working dir: {proj_dir}{skill_block}{ctx}
 
 Read .tg_team/plan.md and implement everything described.
 Use existing code from history above — don't duplicate, extend.
@@ -400,22 +464,41 @@ After implementation write report to .tg_team/coder_output.md:
 
 
 def _fixer_prompt(fix_round: int, prev_round: int) -> str:
-    ctx = _project_context()
-    return f"""You are CODER. Fix round {fix_round}.{ctx}
+    ctx   = _project_context()
+    skill = _skill_style()
+    skill_block = f"\n{skill}\n" if skill else ""
 
-Read .tg_team/debug_round_{prev_round}.md — it contains issues found.
-Fix ALL issues listed. Do not touch what works.
+    # Load and sanitize the debugger report so Coder never sees raw CLI traces
+    debug_summary = ""
+    try:
+        raw_report = open(_p_file(f"debug_round_{prev_round}.md")).read()
+        debug_summary = _sanitize_for_agent(raw_report, max_chars=300)
+    except Exception:
+        pass
+
+    debug_block = (
+        f"\nDEBUGGER SUMMARY (round {prev_round}):\n{debug_summary}\n"
+        if debug_summary else ""
+    )
+
+    return f"""You are CODER. Fix round {fix_round}.{skill_block}{debug_block}{ctx}
+
+Issues above were found by the Debugger. Fix ALL of them. Do not touch what works.
+Full report is in .tg_team/debug_round_{prev_round}.md if you need details.
 
 Update .tg_team/coder_output.md — add section "Fix Round {fix_round}"."""
 
 
 def _debugger_prompt(review_round: int, max_r: int, test_output: str = "") -> str:
     ctx        = _project_context()
+    skill      = _skill_style()
+    skill_block = f"\n{skill}\n" if skill else ""
     limit_note = f"(max {max_r} rounds)" if max_r > 0 else "(no limit)"
     test_section = ""
     if test_output:
-        test_section = f"\n\nAUTO-TEST OUTPUT:\n```\n{test_output}\n```\nConsider test results in your verdict."
-    return f"""You are DEBUGGER. Review round {review_round} {limit_note}.{ctx}
+        sanitized_test = _sanitize_for_agent(test_output, max_chars=500)
+        test_section = f"\n\nAUTO-TEST OUTPUT:\n```\n{sanitized_test}\n```\nConsider test results in your verdict."
+    return f"""You are DEBUGGER. Review round {review_round} {limit_note}.{skill_block}{ctx}
 
 Read:
 - .tg_team/plan.md — requirements and acceptance criteria
@@ -427,12 +510,13 @@ Check project files. Evaluate:
 3. Missing files or incomplete fragments?{test_section}
 
 Write report to .tg_team/debug_round_{review_round}.md
+Write ONLY human-readable analysis. No raw CLI output, no terminal traces.
 
 At the end of the report, on a separate line, exactly one of:
 VERDICT: APPROVED
 VERDICT: ISSUES FOUND
 
-If ISSUES FOUND — list each issue with file and line."""
+If ISSUES FOUND — list each issue with file and line number."""
 
 
 def _code_review_prompt(target: str) -> str:
@@ -622,6 +706,8 @@ def _pipeline(task: str, roles: dict, start_round: int = 0):
         s     = _load_state()
         max_r = s["max_rounds"]
 
+        test_output = ""  # holds initial test run; preserved into first debug round
+
         if start_round == 0:
             # Планирование
             _team_log(f"🗂 PLANNING — {roles['planner'].upper()} creating plan...")
@@ -643,7 +729,6 @@ def _pipeline(task: str, roles: dict, start_round: int = 0):
                 return
 
             # Авто-тесты (если включены, перед дебаггером)
-            test_output = ""
             if s.get("run_tests"):
                 _team_log("🧪 Running tests...")
                 test_output = _run_tests()
@@ -652,7 +737,6 @@ def _pipeline(task: str, roles: dict, start_round: int = 0):
 
         # Цикл проверки/исправления
         review_round = start_round
-        test_output  = ""
         while True:
             if _is_stopped():
                 return
@@ -672,6 +756,18 @@ def _pipeline(task: str, roles: dict, start_round: int = 0):
                 _set_phase("DONE")
                 _append_project_log(task, review_round, "APPROVED")
                 proj = _cur_project()
+
+                # Auto-store experience: if there were fix rounds, save lessons learned
+                if review_round > 1:
+                    try:
+                        debug_path = _p_file(f"debug_round_{review_round - 1}.md")
+                        raw_debug  = open(debug_path).read()
+                        issue_text = _sanitize_for_agent(raw_debug, max_chars=250)
+                        fix_text   = f"Fixed in round {review_round} of task: {task[:150]}"
+                        store_experience(issue_text, fix_text, proj)
+                        _team_log("💡 Experience stored to knowledge base.")
+                    except Exception as _e:
+                        _team_log(f"⚠️ Could not store experience: {_e}")
                 # Сборка если включена
                 if s.get("build_apk"):
                     _run_build()

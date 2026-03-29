@@ -50,7 +50,7 @@ from logger import (
     log, log_debug, log_info, log_warn, log_error,
 )
 from context import (
-    get_model, set_model, agent_label, cmd_model,
+    get_model, set_model, agent_label, ctx_pct, cmd_model,
     get_active, set_active,
     shared_ctx_load, shared_ctx_save, shared_ctx_add,
     shared_ctx_for_prompt, shared_ctx_for_api,
@@ -87,6 +87,7 @@ from ui import (
 
 import team_mode
 import voice as _voice_mod
+import translator
 from memory_manager import get_memory_manager
 
 _request_queue: "queue.Queue[tuple[str, str | None]]" = queue.Queue()
@@ -98,6 +99,7 @@ _no_timeout_event     = threading.Event()
 
 # Mutable _last_request (из config — изменяем здесь)
 _last_request: dict = {}
+_last_request_lock = threading.Lock()
 
 AGENT_FN = {
     "claude":      ask_claude,
@@ -428,13 +430,13 @@ def send_to_agent(agent: str, prompt: str, file_path: str | None = None) -> None
     # Shadow Librarian: update English memory in background (non-blocking daemon thread)
     get_memory_manager().update_background(prompt, reply)
     found_files = _detect_files_in_text(reply)
-    file_markup = _files_keyboard(found_files) if found_files else None
+    markup = _agent_reply_markup(agent, _files_keyboard(found_files) if found_files else None)
     full = f"[{lbl}]\n{reply}"
     if len(full) <= TG_MAX_LEN:
-        tg_send(full, file_markup)
+        tg_send(full, markup)
     else:
         tg_send(f"[{lbl}]")
-        tg_send(reply, file_markup)
+        tg_send(reply, markup)
 
 
 # ── ОЧЕРЕДЬ ЗАПРОСОВ ──────────────────────────────────────────
@@ -496,6 +498,34 @@ def _agent_kb_full() -> dict:
 def _agent_kb_cancel_only() -> dict:
     """1-button keyboard after no-limit is pressed."""
     return kb([[("🛑 Отмена", "cancel_current")]])
+
+
+def _agent_reply_markup(agent: str, file_markup: dict | None) -> dict | None:
+    """
+    Build a combined inline keyboard for an agent response:
+      - File send buttons (if any detected files)
+      - Agent CLI command buttons (compact, 3 per row)
+    Returns None if nothing to show.
+    """
+    rows: list = []
+
+    # File buttons (from existing _files_keyboard result)
+    if file_markup:
+        rows.extend(file_markup.get("inline_keyboard", []))
+
+    # Agent CLI command buttons — use existing cli_cmd: callback
+    cmds = AGENT_CLI_CMDS.get(agent, [])
+    if cmds:
+        row: list = []
+        for cmd, emoji, _desc in cmds:
+            row.append({"text": f"{emoji} {cmd}", "callback_data": f"cli_cmd:{agent}:{cmd}"})
+            if len(row) == 3:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+
+    return {"inline_keyboard": rows} if rows else None
 
 
 def _edit_placeholder(ph_id, lbl: str, elapsed: float,
@@ -636,7 +666,8 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
         return
 
     if text == "/retry":
-        req = _last_request.copy()
+        with _last_request_lock:
+            req = _last_request.copy()
         if req.get("prompt"):
             ag = req["agent"]
             tg_send(f"🔄 Повторяю запрос к {agent_label(ag)}...")
@@ -674,6 +705,47 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
                 tg_send("❌ Укажи число секунд: /timeout gemini 900")
         else:
             tg_send("Использование: /timeout [агент] [секунды]\nПример: /timeout gemini 900")
+        return
+
+    if text.startswith("/limit"):
+        import rate_tracker
+        parts = text.split(maxsplit=3)
+        # /limit                       → show all
+        # /limit reset <agent>         → clear
+        # /limit <agent> <pct> [label] → manual entry
+        if len(parts) == 1:
+            tg_send(rate_tracker.get_all_status())
+        elif len(parts) >= 3 and parts[1] == "reset":
+            rate_tracker.reset(parts[2])
+            tg_send(f"✅ Лимиты {parts[2]} сброшены.")
+        elif len(parts) >= 3:
+            ag, val = parts[1], parts[2]
+            label = parts[3] if len(parts) > 3 else "manual"
+            try:
+                pct = int(val.rstrip("%"))
+                rate_tracker.set_manual(ag, pct, label)
+                tg_send(f"✅ {ag}: {pct}% ({label}) сохранён → будет 🔵 {pct}% {label}")
+            except ValueError:
+                tg_send("❌ Формат: /limit claude 85 5h")
+        else:
+            tg_send(
+                "📊 Лимиты API\n\n"
+                "Показать: /limit\n"
+                "Ввести вручную: /limit claude 85 5h\n"
+                "  (85 = процент ОСТАТКА, 5h = окно)\n"
+                "Сбросить: /limit reset claude\n\n"
+                "OpenRouter лимиты обновляются автоматически\n"
+                "из заголовков ответов API."
+            )
+        return
+
+    if text == "/translate":
+        new_state = translator.toggle()
+        status = "включён ✅" if new_state else "выключен ❌"
+        tg_send(
+            f"🌐 Авто-перевод RU→EN→RU {status}\n"
+            f"{'Твои запросы переводятся в EN перед отправкой агенту, ответ возвращается на RU. Экономия токенов ~20-30%.' if new_state else 'Все сообщения отправляются как есть.'}"
+        )
         return
 
     if text.startswith("/team"):
@@ -725,6 +797,12 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
             "/search <запрос>   — веб-поиск (DuckDuckGo)\n"
             "/s <запрос>        — сокращение /search\n"
             "/git               — Git панель\n\n"
+            "Лимиты API:\n"
+            "/limit             — показать все лимиты\n"
+            "/limit claude 85 5h — ввести вручную (% ОСТАТКА + окно)\n"
+            "/limit reset claude — сбросить\n\n"
+            "Перевод (экономия токенов):\n"
+            "/translate         — вкл/выкл авто-перевод RU→EN→RU\n\n"
             "При зависании агента:\n"
             "/retry             — повторить последний запрос\n"
             "/timeout gemini 900 — изменить таймаут (сек)\n"
@@ -735,6 +813,11 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
 
     if text == "/ctx":
         tg_send(cmd_ctx())
+        return
+
+    if text == "/limits":
+        import rate_tracker
+        tg_send(rate_tracker.get_all_status())
         return
     if text == "/sessions":
         tg_send(cmd_sessions())
@@ -850,7 +933,8 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
     if not prompt and file_path:
         prompt = "Опиши / обработай этот файл."
 
-    _last_request = {"agent": agent, "prompt": prompt, "file_path": file_path}
+    with _last_request_lock:
+        _last_request = {"agent": agent, "prompt": prompt, "file_path": file_path}
 
     log_entry = prompt
     if file_path:
@@ -859,6 +943,14 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
 
     lbl          = agent_label(agent)
     timeout_secs = _AGENT_TIMEOUT.get(agent, 300)
+
+    # ── Auto-translation: start RU→EN in parallel with setup work ──
+    # Translation future begins here so ~2s of placeholder creation and
+    # event setup overlaps with the translation subprocess.
+    _translate_active = agent == "claude" and translator.is_enabled() and not file_path
+    _translate_future = None
+    if _translate_active:
+        _translate_future = translator.submit_en(prompt)
 
     # Clear all control events for this request
     _cancel_event.clear()
@@ -890,7 +982,20 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
     remaining   = timeout_secs  # always initialized before loop
 
     def _worker():
-        result_box.append(AGENT_FN[agent](prompt, file_path))
+        # Resolve translated prompt (likely already done, minimal wait)
+        if _translate_active and _translate_future is not None:
+            try:
+                en_prompt = _translate_future.result(timeout=28)
+            except Exception:
+                en_prompt = prompt
+            agent_prompt = en_prompt
+        else:
+            agent_prompt = prompt
+        raw_reply = AGENT_FN[agent](agent_prompt, file_path)
+        # Translate response back to RU
+        if _translate_active:
+            raw_reply = translator.translate_to_ru(raw_reply)
+        result_box.append(raw_reply)
 
     t = threading.Thread(target=_worker, daemon=True)
     t.start()
@@ -964,18 +1069,22 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
     log(f"{AGENT_NAMES[agent]}: {reply[:80]}...")
 
     found_files = _detect_files_in_text(reply)
-    file_markup = _files_keyboard(found_files) if found_files else None
+    markup = _agent_reply_markup(
+        agent, _files_keyboard(found_files) if found_files else None
+    )
 
+    # Refresh label — ctx% updated after agent wrote to context
+    lbl = agent_label(agent)
     header = f"[{lbl}]\n"
     full = header + reply
     if ph_id:
         if len(full) <= TG_MAX_LEN:
-            tg_edit(ph_id, full, file_markup)
+            tg_edit(ph_id, full, markup)
         else:
             tg_edit(ph_id, f"[{lbl}] — ответ ниже:")
-            tg_send(reply, file_markup)
+            tg_send(reply, markup)
     else:
-        tg_send(full, file_markup)
+        tg_send(full, markup)
 
     for fp in found_files:
         ext = os.path.splitext(fp)[1].lower()
@@ -1011,7 +1120,8 @@ def handle_callback(cb: dict) -> None:
 
     elif data == "retry_last":
         tg_answer_cb(cb_id, "🔄 Повторяю запрос...")
-        req = _last_request.copy()
+        with _last_request_lock:
+            req = _last_request.copy()
         if req.get("prompt"):
             threading.Thread(
                 target=send_to_agent,
@@ -1316,6 +1426,36 @@ def process_update(upd: dict) -> None:
     prompt_text = text or caption
     file_path = None
 
+    if prompt_text and prompt_text.startswith("/limit"):
+        import rate_tracker
+        parts = prompt_text.split()
+        if len(parts) == 1:
+            tg_send(rate_tracker.get_all_status())
+            return
+        
+        # /limit reset <agent>
+        if len(parts) >= 3 and parts[1] == "reset":
+            agent = parts[2].lower()
+            rate_tracker.reset(agent)
+            tg_send(f"✅ Данные лимитов для {agent} сброшены.")
+            return
+
+        # /limit <agent> <pct> [label]
+        if len(parts) >= 3:
+            agent = parts[1].lower()
+            try:
+                pct = int(parts[2].replace("%", ""))
+                label = parts[3] if len(parts) > 3 else "manual"
+                rate_tracker.set_manual(agent, pct, label)
+                tg_send(f"✅ Лимит {agent} установлен: {pct}% ({label})")
+                tg_set_keyboard() # Обновить placeholder
+            except ValueError:
+                tg_send("⚠️ Ошибка: процент должен быть числом. Пример: /limit claude 85 5h")
+            return
+        
+        tg_send("Использование:\n/limit — статус\n/limit <агент> <%> [лейбл] — задать вручную\n/limit reset <агент> — сбросить")
+        return
+
     if photo:
         best = photo[-1]
         file_path = download_tg_file(best["file_id"], "photo.jpg")
@@ -1364,6 +1504,8 @@ def main() -> None:
     ensure_dirs()
     _setup_logging()
     _check_single_instance()
+    from config import ensure_db
+    ensure_db()
     threading.excepthook = _thread_excepthook
 
     log_info(f"=== tg_agent запущен === PID={os.getpid()}")

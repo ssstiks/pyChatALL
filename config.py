@@ -1,16 +1,17 @@
-#!/usr/bin/env python3
+YOUR_BOT_TOKEN_HEREusr/bin/env python3
 """
 Глобальные константы и конфигурация tg_agent.
 Не импортирует ничего из других модулей проекта.
 """
 
+import os
 import threading
 import pathlib
 
 # ════════════════════════════════════════
 #  TELEGRAM + АГЕНТЫ
 # ════════════════════════════════════════
-BOT_TOKEN    = "YOUR_BOT_TOKEN_HERE"
+BOT_TOKEN    = os.getenv("BOT_TOKEN", "fallback-dev-token")
 ALLOWED_CHAT = YOUR_TELEGRAM_ID
 
 OPENROUTER_API_KEY = ""  # fallback если нет файла; лучше задать через бот
@@ -201,10 +202,11 @@ def ensure_dirs() -> None:
 
 
 # ============================================================================
-# Auto-initialization: Create directories and database on import
+# Auto-initialization: Create directories on import (lightweight, always safe)
+# Database initialization is deferred to ensure_db() called from main entry point
 # ============================================================================
 
-# Create required directories
+# Create required directories (no I/O beyond mkdir — safe at import time)
 for directory in [
     os.path.dirname(DB_PATH),
     ARCHIVE_DIR,
@@ -212,24 +214,31 @@ for directory in [
 ]:
     os.makedirs(directory, exist_ok=True)
 
-# Auto-initialize SQLite database if it doesn't exist
-if not os.path.exists(DB_PATH):
-    print(f"[CONFIG] Creating new SQLite database at {DB_PATH}")
-    try:
-        from db_manager import Database
-        db = Database(DB_PATH)
-        db.initialize()
-        print(f"[CONFIG] Database initialized successfully")
 
-        # Run one-time migration if JSON files exist
-        print(f"[CONFIG] Checking for legacy state files...")
-        from migrate_json_to_sqlite import migrate_json_to_sqlite
-        if migrate_json_to_sqlite():
-            print(f"[CONFIG] Initialization complete")
-        else:
-            print(f"[CONFIG] Initialization complete (no legacy files to migrate)")
-    except Exception as e:
-        print(f"[CONFIG] Warning: Could not auto-initialize database: {e}")
-else:
-    # Database exists, just ensure directories are in place
-    ensure_dirs()
+def ensure_db() -> None:
+    """Initialize SQLite database and run one-time migration if needed.
+
+    Must be called explicitly from the main entry point (tg_agent.py),
+    NOT at import time — avoids blocking startup and circular-import issues.
+    """
+    import logging
+    _log = logging.getLogger(__name__)
+
+    if not os.path.exists(DB_PATH):
+        _log.info("[CONFIG] Creating new SQLite database at %s", DB_PATH)
+        try:
+            from db_manager import Database
+            db = Database(DB_PATH)
+            db.initialize()
+            _log.info("[CONFIG] Database initialized successfully")
+
+            _log.info("[CONFIG] Checking for legacy state files...")
+            from migrate_json_to_sqlite import migrate_json_to_sqlite
+            if migrate_json_to_sqlite():
+                _log.info("[CONFIG] Legacy migration complete")
+            else:
+                _log.info("[CONFIG] No legacy files to migrate")
+        except Exception as e:
+            _log.warning("[CONFIG] Could not auto-initialize database: %s", e)
+    else:
+        ensure_dirs()

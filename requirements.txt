@@ -1,0 +1,19 @@
+# pyChatALL Backend Dependencies
+# FastAPI and Web Server
+fastapi==0.104.1
+uvicorn==0.24.0
+pydantic==2.5.0
+
+# Authentication
+PyJWT==2.8.1
+
+# Optional: Voice Processing
+openai-whisper==20231117
+gtts==2.5.1
+
+# Optional: Audio Conversion
+# ffmpeg-python==0.2.1
+
+# For development/testing
+pytest==7.4.3
+pytest-asyncio==0.21.1

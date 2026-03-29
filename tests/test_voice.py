@@ -70,16 +70,26 @@ def test_ensure_whisper_pip_ok():
 
 def test_ensure_whisper_pip_fails():
     """If pip install fails (non-zero rc), RuntimeError is raised."""
+    import builtins
+
     proc = mock.MagicMock()
     proc.returncode = 1
     proc.stderr = b"ERROR: Could not find a version"
+
+    original_import = builtins.__import__
+
+    def _block_whisper(name, *args, **kwargs):
+        if name == "whisper":
+            raise ImportError("no module named whisper")
+        return original_import(name, *args, **kwargs)
 
     original = sys.modules.get("whisper")
     sys.modules.pop("whisper", None)
     try:
         with mock.patch("subprocess.run", return_value=proc):
-            with pytest.raises(RuntimeError, match="pip install openai-whisper failed"):
-                voice._ensure_whisper()
+            with mock.patch("builtins.__import__", side_effect=_block_whisper):
+                with pytest.raises(RuntimeError, match="pip install openai-whisper failed"):
+                    voice._ensure_whisper()
     finally:
         if original is not None:
             sys.modules["whisper"] = original

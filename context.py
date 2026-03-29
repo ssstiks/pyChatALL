@@ -50,11 +50,41 @@ def set_model(agent: str, model: str) -> None:
         log_error(f"Failed to set model for {agent}: {e}")
 
 
+def ctx_pct(agent: str) -> str:
+    """Returns compact ctx-usage indicator: '🟢 5%' / '🟡 47%' / '🔴 83%'."""
+    try:
+        used = db.get_context_usage(agent)
+        _, archive = CTX_LIMITS.get(agent, (0, 1))
+        pct = int(used / archive * 100) if archive else 0
+        icon = "🟢" if pct < 50 else ("🟡" if pct < 80 else "🔴")
+        return f"{icon} {pct}%"
+    except Exception:
+        return ""
+
+
 def agent_label(agent: str) -> str:
-    """Возвращает строку типа 'Claude (claude-sonnet-4-6)'."""
+    """
+    Возвращает строку типа 'Claude (haiku) 🔵 85% 5h'
+    Приоритет индикатора:
+      1. rate_tracker (реальные API-лимиты / ручной ввод)  → 🟢🟡🔴🔵
+      2. ctx_pct (контекстное окно)                        → 🟢🟡🔴
+    """
     m = get_model(agent)
     name = AGENT_NAMES.get(agent, agent)
-    return f"{name} ({m})" if m else name
+    base = f"{name} ({m})" if m else name
+
+    # Try real rate limit data first
+    try:
+        import rate_tracker
+        indicator = rate_tracker.get_display(agent)
+    except Exception:
+        indicator = ""
+
+    # Fallback: context window %
+    if not indicator:
+        indicator = ctx_pct(agent)
+
+    return f"{base} {indicator}" if indicator else base
 
 
 def cmd_model(agent: str, arg: str) -> str:
@@ -81,7 +111,16 @@ def cmd_model(agent: str, arg: str) -> str:
         return "\n".join(lines)
 
     set_model(agent, arg)
-    return f"✅ {name}: модель установлена — `{arg}`"
+    # Reset session so the new model is used cleanly (no --resume with old model)
+    _session_map = {
+        "claude": (CLAUDE_SESSION, CLAUDE_CTX_FILE),
+        "gemini": (GEMINI_SESSION, GEMINI_CTX_FILE),
+        "qwen":   (QWEN_SESSION,   QWEN_CTX_FILE),
+    }
+    sf, cf = _session_map.get(agent, (None, None))
+    if sf:
+        _reset_session(sf, cf)
+    return f"✅ {name}: модель установлена — `{arg}` (сессия сброшена)"
 
 
 # ── СЕССИИ CLI-АГЕНТОВ ───────────────────────────────────────
@@ -188,13 +227,17 @@ def set_active(agent: str) -> None:
 def shared_ctx_load() -> list:
     """Load shared context messages from database."""
     try:
-        # Get all messages from database (order by timestamp)
         messages = db.get_recent_messages(limit=1000)
-        # Add timestamp field in HH:MM format for backward compatibility
         result = []
         for msg in messages:
             msg_copy = dict(msg)
-            msg_copy['ts'] = time.strftime("%H:%M")  # Use current time format for backward compatibility
+            # Use real stored timestamp; fall back to current time only if missing
+            raw_ts = msg_copy.get("timestamp") or ""
+            if raw_ts:
+                # DB stores "YYYY-MM-DD HH:MM:SS" — extract HH:MM
+                msg_copy['ts'] = raw_ts[11:16] if len(raw_ts) >= 16 else raw_ts
+            else:
+                msg_copy['ts'] = time.strftime("%H:%M")
             result.append(msg_copy)
         return result
     except Exception:
@@ -214,14 +257,75 @@ def shared_ctx_save(log_list: list) -> None:
         pass
 
 
-def shared_ctx_add(role: str, content: str, agent: str = "") -> None:
-    """Add a message to the shared context database.
+_NOISE_PATTERNS = re.compile(
+    r'^(\s*[\da-f]{2}([\s:,][\da-f]{2}){7,})'  # hex dumps
+    r'|^(\s*[\[{<].*?(error|warn|debug|info|trace).*?[\]}>]\s*)$'  # bare log lines
+    r'|^\s*(ok|done|yes|no|ok\.?|готово|принял|запустил|ок)\s*$',  # CLI acks
+    re.IGNORECASE | re.DOTALL,
+)
+_MAX_MESSAGES = 100 # Уменьшаем с 200 до 100 для экономии
+_MAX_CONTENT_LEN = 600 # Уменьшаем с 1000 до 600
+_TRUNCATE_HEAD = 300
+_TRUNCATE_TAIL = 300
 
-    Automatically maintains a limit of ~200 messages.
+def _quality_filter(role: str, content: str) -> str | None:
+    """Агрессивная фильтрация мусора для экономии лимитов Claude."""
+    if not content or not content.strip():
+        return None
+
+    stripped = content.strip()
+
+    # Фильтруем технический шум (дампы, длинные логи, системные ответы)
+    noise_patterns = [
+        r'^(\s*[\da-f]{2}([\s:,][\da-f]{2}){7,})', # hex
+        r'([\[{<].*?(error|warn|debug|info|trace).*?[\]}>])', # logs
+        r'(Cloning into|Unpacking objects|Resolving deltas)', # git noise
+        r'(npm install|added \d+ packages|found \d+ vulnerabilities)', # npm noise
+    ]
+    for p in noise_patterns:
+        if re.search(p, stripped, re.I | re.M):
+            # Если это чисто шум — удаляем, если шум внутри — обрезаем
+            if len(stripped) > 500: return "[Технический вывод удален для экономии лимитов]"
+
+    # De-duplication
+    if _last_saved.get(role) == stripped:
+        return None
+
+    # Truncation
+    if len(stripped) > _MAX_CONTENT_LEN:
+        head = stripped[:_TRUNCATE_HEAD]
+        tail = stripped[-_TRUNCATE_TAIL:]
+        stripped = f"{head}\n[...контент обрезан для экономии лимитов...]\n{tail}"
+
+    return stripped
+
+
+def shared_ctx_add(role: str, content: str, agent: str = "") -> None:
+    """Add a message to the shared context database with quality filtering.
+
+    Filters: truncation (>1000 chars), noise reduction, de-duplication.
+    Rolling buffer: keeps only the last 200 messages.
+    INSERT + rolling-DELETE run in a single transaction to avoid a window
+    where the table exceeds MAX_MESSAGES between the two operations.
     """
+    filtered = _quality_filter(role, content)
+    if filtered is None:
+        return
+
     with _lock:
         try:
-            db.add_message(role=role, content=content, agent=agent)
+            with db.get_connection() as conn:
+                conn.execute(
+                    'INSERT INTO messages (user_id, role, agent, content) VALUES (?, ?, ?, ?)',
+                    ('default', role, agent, filtered),
+                )
+                conn.execute(
+                    """DELETE FROM messages WHERE id NOT IN (
+                        SELECT id FROM messages ORDER BY id DESC LIMIT ?
+                    )""",
+                    (_MAX_MESSAGES,),
+                )
+            _last_saved[role] = filtered
         except Exception as e:
             log_error(f"Failed to add message to database: {e}")
 
@@ -260,6 +364,47 @@ def shared_ctx_for_prompt() -> str:
     return text
 
 
+def _build_lessons_block(active_projects: list) -> str:
+    """Query knowledge_base for relevant lessons and format as [RELEVANT_LESSONS: ...].
+
+    Queries the active projects first; falls back to general lessons if none found.
+    Returns empty string when table has no matching entries.
+    """
+    try:
+        lessons: list[dict] = []
+        seen: set[str] = set()
+
+        for project in active_projects[:3]:  # cap at 3 projects
+            for row in db.get_lessons(project_name=project, limit=3):
+                key = row["error_summary"]
+                if key not in seen:
+                    lessons.append(row)
+                    seen.add(key)
+
+        # Fallback: general lessons if no project-specific ones found
+        if not lessons:
+            for row in db.get_lessons(limit=3):
+                key = row["error_summary"]
+                if key not in seen:
+                    lessons.append(row)
+                    seen.add(key)
+
+        if not lessons:
+            return ""
+
+        lines = ["[RELEVANT_LESSONS:"]
+        for row in lessons:
+            proj = row.get("project_name", "general")
+            err = row["error_summary"]
+            fix = row["fix_steps"]
+            lines.append(f"  [{proj}] Problem: {err} → Fix: {fix}")
+        lines.append("]")
+        return "\n".join(lines)
+
+    except Exception:
+        return ""
+
+
 def global_ctx_for_prompt(skip_recent: bool = False) -> str:
     """
     Token-efficient context injection:
@@ -278,24 +423,31 @@ def global_ctx_for_prompt(skip_recent: bool = False) -> str:
     mm = get_memory_manager()
     parts.append(mm.to_prompt_block())
 
-    # 2. Last 3 raw Russian messages — skip for Claude with active session
+    # 1b. Relevant lessons from knowledge base
+    try:
+        mem_data = mm.load()
+        active_projects = mem_data.get("project_state", {}).get("active_projects", [])
+        lessons_block = _build_lessons_block(active_projects)
+        if lessons_block:
+            parts.append(lessons_block)
+    except Exception:
+        pass
+
+    # 2. Last 3 raw Russian messages from DB — skip for Claude with active session
     if not skip_recent:
         try:
-            if os.path.exists(SHARED_CTX_FILE):
-                with open(SHARED_CTX_FILE, encoding="utf-8") as f:
-                    msgs = json.load(f)
-                if isinstance(msgs, list) and msgs:
-                    recent = msgs[-3:]
-                    lines = []
-                    for m in recent:
-                        role = m.get("role", "?")
-                        agent = m.get("agent", "")
-                        content = str(m.get("content", ""))[:500]  # hard cap per message
-                        label = f"{agent}({role})" if agent else role
-                        lines.append(f"[{label}]: {content}")
-                    if lines:
-                        parts.append("[Recent context (RU):\n" + "\n".join(lines) + "]")
-        except (json.JSONDecodeError, OSError):
+            recent = db.get_recent_messages(limit=3)
+            if recent:
+                lines = []
+                for m in recent:
+                    role = m.get("role", "?")
+                    agent_name = m.get("agent", "")
+                    content = str(m.get("content", ""))[:500]  # hard cap per message
+                    label = f"{agent_name}({role})" if agent_name else role
+                    lines.append(f"[{label}]: {content}")
+                if lines:
+                    parts.append("[Recent context (RU):\n" + "\n".join(lines) + "]")
+        except Exception:
             pass
 
     return "\n\n".join(parts)

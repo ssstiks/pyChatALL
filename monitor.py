@@ -13,7 +13,8 @@ from collections import defaultdict
 LOG_FILE  = "/tmp/tg_agent.log"
 ERR_FILE  = "/tmp/tg_agent_errors.log"
 PID_FILE  = "/tmp/tg_agent.pid"
-STATE_DIR = "/tmp/tg_agent"
+STATE_DIR = os.path.expanduser("~/.local/share/pyChatALL")
+DB_PATH   = os.path.join(STATE_DIR, "pychatall.db")
 
 # ANSI цвета
 R  = "\033[91m"   # red
@@ -54,26 +55,39 @@ def is_agent_alive() -> tuple[bool, int]:
         os.kill(pid, 0)
         return True, pid
     except Exception:
-        # fallback: поищем по имени
-        r = subprocess.run(["pgrep", "-f", "tg_agent.py"], capture_output=True, text=True)
-        if r.stdout.strip():
-            pid = int(r.stdout.strip().split()[0])
-            return True, pid
+        # fallback: поищем по имени, исключая текущий процесс
+        r = subprocess.run(
+            ["pgrep", "-f", "python.*tg_agent\\.py"],
+            capture_output=True, text=True,
+        )
+        pids = [p for p in r.stdout.strip().split() if p.isdigit() and int(p) != os.getpid()]
+        if pids:
+            return True, int(pids[0])
         return False, 0
 
 
 def get_active_agent() -> str:
     try:
-        return open(f"{STATE_DIR}/active_agent.txt").read().strip()
+        import sqlite3
+        with sqlite3.connect(DB_PATH) as conn:
+            row = conn.execute(
+                "SELECT user_value FROM settings WHERE user_key = 'active_agent' LIMIT 1"
+            ).fetchone()
+            return row[0] if row else "?"
     except Exception:
         return "?"
 
 
 def get_session(agent: str) -> str:
-    f = f"{STATE_DIR}/{agent}_session.txt"
     try:
-        v = open(f).read().strip()
-        return v[:20] if v else "нет"
+        import sqlite3
+        with sqlite3.connect(DB_PATH) as conn:
+            row = conn.execute(
+                "SELECT session_id FROM sessions WHERE agent = ? AND user_id = 'default' LIMIT 1",
+                (agent,),
+            ).fetchone()
+            v = row[0] if row else ""
+            return v[:20] if v else "нет"
     except Exception:
         return "нет"
 

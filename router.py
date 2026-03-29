@@ -47,18 +47,25 @@ Task: {prompt}"""
 def _rule_classify(prompt: str, file_path: str | None) -> str:
     if file_path is not None:
         return "sonnet"
-    if "```" in prompt or "`" in prompt:
+    # Увеличиваем порог: 1000 символов вместо 300.
+    # Большинство простых вопросов и правок кода влезают в 1000 симв.
+    if len(prompt) > 1000:
         return "sonnet"
-    if len(prompt) > 300:
+    # Ищем код: только если это блоки кода ``` (многострочные)
+    if "```" in prompt:
         return "sonnet"
+    
     prompt_lower = prompt.lower()
-    if any(kw in prompt_lower for kw in _SONNET_KEYWORDS_RU):
+    # Более специфичные ключевые слова для сложной разработки
+    complex_keywords = (
+        "архитектур", "алгоритм", "рефактор", "внедри", "разработай", 
+        "architecture", "algorithm", "refactor", "implement", "design"
+    )
+    if any(kw in prompt_lower for kw in complex_keywords):
         return "sonnet"
-    if any(kw in prompt_lower for kw in _SONNET_KEYWORDS_EN):
-        return "sonnet"
-    if len(prompt) < 80:
-        return "haiku"
-    return "ambiguous"
+    
+    # Для всего остального (вопросы, мелкие фиксы) — Haiku
+    return "haiku"
 
 
 def _run_subprocess_lazy(cmd: list, timeout: int, cwd: str, env: dict):
@@ -103,7 +110,7 @@ def _classify_with_binary(binary: str, prompt: str) -> str | None:
         env.pop(var, None)
     try:
         stdout, stderr, rc, timed_out = _run_subprocess_lazy(
-            cmd, timeout=2, cwd=WORK_DIR, env=env
+            cmd, timeout=8, cwd=WORK_DIR, env=env
         )
         if timed_out or rc != 0:
             return None
@@ -126,14 +133,14 @@ def _ai_classify(prompt: str) -> str:
     }
     result = None
     try:
-        for future in concurrent.futures.as_completed(futures, timeout=3):
+        for future in concurrent.futures.as_completed(futures, timeout=10):
             res = future.result()
             if res is not None:
                 log_info(f"Router: AI classifier → {res} (binary={futures[future]})")
                 result = res
                 break
     except concurrent.futures.TimeoutError:
-        log_warn("Router: AI classifier timed out (3s) — defaulting to Sonnet")
+        log_warn("Router: AI classifier timed out (10s) — defaulting to Sonnet")
     finally:
         executor.shutdown(wait=False, cancel_futures=True)
 

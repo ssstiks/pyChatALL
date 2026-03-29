@@ -67,7 +67,10 @@ def test_update_background_is_nonblocking_and_calls_agent(tmp_path):
     # reached _run_updater_agent by the time update_background() returns
     with patch("memory_manager._run_updater_agent", side_effect=fake_agent):
         t0 = time.monotonic()
-        mm.update_background("user: test", "assistant: ok")
+        mm.update_background(
+            "user: fixed the JWT expiry bug in auth.py by switching to HS256",
+            "assistant: Good fix. HS256 is simpler and sufficient for this use case.",
+        )
         elapsed = time.monotonic() - t0
         assert elapsed < 0.1, f"update_background blocked for {elapsed:.3f}s"
         # Wait up to 3s for background thread to call the agent (inside patch ctx)

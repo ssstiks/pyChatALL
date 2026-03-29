@@ -265,13 +265,19 @@ def _run_cli(binary: str, session_file: str, ctx_file: str,
 
     is_claude = "claude" in binary
 
+    # Авто-перевод для Claude: RU -> EN для экономии лимитов
+    original_prompt = prompt
+    if is_claude:
+        from translator import translate_to_en
+        prompt = translate_to_en(prompt)
+
     # skip_recent=True when Claude has active session (CLI already has history)
     sid = _load_session(session_file) if is_claude else None
     ctx_text = global_ctx_for_prompt(skip_recent=bool(sid))
 
     parts = []
     if ctx_text:
-        parts.append(f"[Контекст диалога:\n{ctx_text}\n]")
+        parts.append(ctx_text)
     if file_path and os.path.exists(file_path):
         try:
             rel_path = os.path.relpath(file_path, WORK_DIR)
@@ -279,17 +285,10 @@ def _run_cli(binary: str, session_file: str, ctx_file: str,
             rel_path = file_path
         mime = mimetypes.guess_type(file_path)[0] or ""
         if "image" in mime:
-            parts.append(
-                f"[Изображение: {rel_path}]\n"
-                f"Используй инструмент read_file или Read чтобы просмотреть изображение "
-                f"и ответить на вопрос пользователя."
-            )
+            parts.append(f"[img: {rel_path}]")
         else:
-            parts.append(
-                f"[Файл: {rel_path}]\n"
-                f"Прочитай содержимое файла и ответь на вопрос пользователя."
-            )
-    parts.append(f"Вопрос: {prompt}" if ctx_text or file_path else prompt)
+            parts.append(f"[file: {rel_path}]")
+    parts.append(prompt)
     full_prompt = "\n\n".join(parts)
 
     agent_key = ("claude" if "claude" in binary else
@@ -344,6 +343,24 @@ def _run_cli(binary: str, session_file: str, ctx_file: str,
         if rc != 0 and not raw:
             log_warn(f"  {agent_name} exit={rc} stderr: {stderr.strip()[:300]}")
 
+        # --- SAFE RATE LIMIT TRACKING ---
+        import rate_tracker
+        if is_claude and rc == 0:
+            rate_tracker.log_request(agent_key) # Локальный счетчик (эвристика)
+
+            # Пассивный парсинг системных сообщений из stdout/stderr
+            combined_output = stdout + stderr
+            try:
+                rate_tracker.parse_cli_warning(agent_key, combined_output)
+            except Exception as e:
+                # Отправляем ошибку парсинга в базу знаний (Knowledge Base)
+                from db_manager import Database
+                from config import DB_PATH
+                db = Database(DB_PATH)
+                db.add_lesson("claude_cli_parsing", f"Regex failed on output", f"Error: {e}\nOutput: {combined_output[:200]}")
+                log_error("Rate limit parsing failed", e)
+        # --------------------------------
+
         # Only check for rate limits on error responses (rc != 0) and only in
         # stderr — scanning raw stdout causes false positives when Claude's
         # reply happens to mention "quota", "overloaded", etc. in normal text.
@@ -365,6 +382,11 @@ def _run_cli(binary: str, session_file: str, ctx_file: str,
             )
 
         reply = _parse_cli_output(raw, session_file) or stderr.strip()[:1000] or "⚠️ Пустой ответ"
+
+        # Обратный перевод для Claude: EN -> RU
+        if is_claude and reply and not reply.startswith("⚠️"):
+            from translator import translate_to_ru
+            reply = translate_to_ru(reply)
 
         log_info(f"← {agent_name} {elapsed:.1f}s reply={len(reply)}ch: {reply[:120]!r}")
 
@@ -660,6 +682,12 @@ def ask_openrouter(prompt: str, file_path: str | None = None) -> str:
         )
         data = r.json()
         elapsed = time.time() - t
+        # Capture rate-limit headers (non-blocking, best-effort)
+        try:
+            import rate_tracker
+            rate_tracker.update_from_headers("openrouter", r.headers)
+        except Exception:
+            pass
         if "error" in data:
             err = data["error"]
             msg = err.get("message", str(err))
