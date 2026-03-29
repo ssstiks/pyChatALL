@@ -267,6 +267,7 @@ _MAX_MESSAGES = 100 # Уменьшаем с 200 до 100 для экономии
 _MAX_CONTENT_LEN = 600 # Уменьшаем с 1000 до 600
 _TRUNCATE_HEAD = 300
 _TRUNCATE_TAIL = 300
+_last_saved: dict[str, str] = {}  # dedup cache: role → last saved content
 
 def _quality_filter(role: str, content: str) -> str | None:
     """Агрессивная фильтрация мусора для экономии лимитов Claude."""
