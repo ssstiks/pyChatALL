@@ -134,6 +134,7 @@ _KB_AGENT_LABELS = {
     "gemini":      "🟢 Gemini",
     "qwen":        "🟡 Qwen",
     "openrouter":  "🌐 OpenRouter",
+    "ollama":      "🦙 Ollama",
 }
 _KB_TEXT_TO_AGENT: dict[str, str] = {}
 for _ag, _lbl in _KB_AGENT_LABELS.items():
@@ -154,8 +155,8 @@ def _build_reply_keyboard(active: str) -> dict:
 
     return {
         "keyboard": [
-            [agent_btn("claude"), agent_btn("gemini"),
-             agent_btn("qwen"),   agent_btn("openrouter")],
+            [agent_btn("claude"), agent_btn("gemini"), agent_btn("qwen")],
+            [agent_btn("openrouter"), agent_btn("ollama")],
             ["📋 /menu", "🔀 /all", "💬 /discuss", "📁 /files"],
             ["📊 /ctx", "📊 /limits", "🔧 /setup", "🧠 /memory"],
         ],

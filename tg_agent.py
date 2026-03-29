@@ -74,6 +74,7 @@ from agents import (
     get_openrouter_key, set_openrouter_key, ask_openrouter,
     _or_fetch_models, or_search_models, _or_cb, _or_model_label, _or_id_map,
     OR_MODELS_TTL,
+    ask_ollama, async_ask_ollama,
 )
 from ui import (
     _split_text, _tg_send_one, tg_send, tg_edit, tg_answer_cb, tg_typing,
@@ -109,6 +110,7 @@ AGENT_FN = {
     "openrouter":  ask_openrouter,
     "gemini":      ask_gemini,
     "qwen":        ask_qwen,
+    "ollama":      ask_ollama,
 }
 
 PREFIX_MAP = {
@@ -117,6 +119,8 @@ PREFIX_MAP = {
     "/or":         "openrouter",
     "/gemini":     "gemini",
     "/qwen":       "qwen",
+    "/ollama":     "ollama",
+    "/ol":         "ollama",
 }
 
 
@@ -200,7 +204,7 @@ def cmd_reset(arg: str) -> str:
             os.remove(f"{STATE_DIR}/shared_context.json")
         return "✅ Все сессии сброшены."
     if agent not in AGENT_NAMES:
-        return f"⚠️ Неизвестно: {arg}. Используй: claude/gemini/qwen/openrouter/all"
+        return f"⚠️ Неизвестно: {arg}. Используй: claude/gemini/qwen/openrouter/ollama/all"
     sf_map = {
         "claude":     (CLAUDE_SESSION, CLAUDE_CTX_FILE),
         "gemini":     (GEMINI_SESSION, GEMINI_CTX_FILE),
@@ -223,6 +227,7 @@ def cmd_all(prompt: str, file_path: str | None = None) -> None:
         ("gemini",     ask_gemini),
         ("qwen",       ask_qwen),
         ("openrouter", ask_openrouter),
+        ("ollama",     ask_ollama),
     ]
 
     def run_one(ag: str, fn):
@@ -251,10 +256,10 @@ def run_discussion(question: str, file_path: str | None = None) -> None:
         tg_send("⚠️ Нужно минимум 2 агента. Настрой в /menu → 💬 Обсуждение")
         return
 
-    icons = {"claude": "🔵", "gemini": "🟢", "qwen": "🟡", "openrouter": "🌐"}
+    icons = {"claude": "🔵", "gemini": "🟢", "qwen": "🟡", "openrouter": "🌐", "ollama": "🦙"}
     names = AGENT_NAMES
 
-    names_str = " → ".join(f"{icons[a]} {names[a]}" for a in participants)
+    names_str = " → ".join(f"{icons.get(a, '🤖')} {names[a]}" for a in participants)
     tg_send(f"💬 Обсуждение начато\n{names_str}\n\nВопрос: {question}")
     shared_ctx_add("user", f"[Обсуждение] {question}")
 
@@ -777,7 +782,8 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
             f"/claude      — {agent_label('claude')}\n"
             f"/gemini      — {agent_label('gemini')}\n"
             f"/qwen        — {agent_label('qwen')}\n"
-            f"/openrouter  — OpenRouter API (/or — сокращение)\n\n"
+            f"/openrouter  — OpenRouter API (/or — сокращение)\n"
+            f"/ollama      — Ollama (локальные модели, /ol — сокращение)\n\n"
             "Модели:\n"
             "  /claude /model list           — список\n"
             "  /claude /model opus           — сменить\n"
@@ -916,6 +922,16 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
             if prompt.startswith("/search"):
                 query = prompt[len("/search"):].strip() or "openai"
                 threading.Thread(target=send_or_model_search, args=(query,), daemon=True).start()
+                return
+
+        if agent == "ollama" and prompt:
+            if prompt.startswith("models") or prompt.startswith("/models"):
+                from agents import get_ollama_models
+                models = get_ollama_models()
+                if models:
+                    tg_send("🦙 Ollama модели:\n" + "\n".join(f"  • {m}" for m in models))
+                else:
+                    tg_send("❌ Ollama недоступна или моделей нет.\nЗапустите: ollama serve")
                 return
 
         if prompt and prompt.startswith("/model"):
@@ -1340,8 +1356,8 @@ def handle_callback(cb: dict) -> None:
         discuss_await_set()
         tg_answer_cb(cb_id, "✏️ Напиши вопрос")
         participants = discuss_get_agents()
-        icons = {"claude": "🔵", "gemini": "🟢", "qwen": "🟡", "openrouter": "🌐"}
-        names_str = " → ".join(f"{icons[a]} {AGENT_NAMES[a]}" for a in participants)
+        icons = {"claude": "🔵", "gemini": "🟢", "qwen": "🟡", "openrouter": "🌐", "ollama": "🦙"}
+        names_str = " → ".join(f"{icons.get(a, '🤖')} {AGENT_NAMES[a]}" for a in participants)
         tg_edit(msg_id,
                 f"💬 Режим обсуждения активен\n\n{names_str}\n\n✏️ Напиши вопрос для обсуждения:",
                 kb([[("❌ Отмена", "discuss_cancel")]]))

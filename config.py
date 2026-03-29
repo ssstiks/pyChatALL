@@ -37,6 +37,9 @@ QWEN_MODEL_FILE  = f"{STATE_DIR}/qwen_model.txt"
 OPENROUTER_MODEL_FILE   = f"{STATE_DIR}/openrouter_model.txt"
 OPENROUTER_KEY_FILE     = f"{STATE_DIR}/openrouter_key.txt"
 OPENROUTER_MODELS_CACHE = f"{STATE_DIR}/openrouter_models.json"
+OLLAMA_SESSION   = f"{STATE_DIR}/ollama_session.txt"
+OLLAMA_CTX_FILE  = f"{STATE_DIR}/ollama_ctx_chars.txt"
+OLLAMA_MODEL_FILE = f"{STATE_DIR}/ollama_model.txt"
 SHARED_CTX_FILE  = f"{STATE_DIR}/shared_context.json"
 ARCHIVE_DIR      = f"{STATE_DIR}/archive"
 DOWNLOAD_DIR     = f"{STATE_DIR}/downloads"
@@ -54,6 +57,7 @@ MODEL_FILES = {
     "gemini":      GEMINI_MODEL_FILE,
     "qwen":        QWEN_MODEL_FILE,
     "openrouter":  OPENROUTER_MODEL_FILE,
+    "ollama":      OLLAMA_MODEL_FILE,
 }
 
 LOG_FILE     = "/tmp/tg_agent.log"
@@ -67,6 +71,7 @@ CTX_LIMITS = {
     "gemini":      (500_000, 1_500_000),
     "qwen":        (100_000,  300_000),
     "openrouter":  ( 60_000,  200_000),
+    "ollama":      ( 60_000,  200_000),
 }
 
 # ── Таймауты агентов (секунды) ────────────────────────────────
@@ -75,6 +80,7 @@ _AGENT_TIMEOUT: dict[str, int] = {
     "gemini":     600,
     "qwen":       300,
     "openrouter": 120,
+    "ollama":      120,
 }
 
 # ── Fallback-модели Gemini ────────────────────────────────────
@@ -129,6 +135,10 @@ DEFAULT_MODELS = {
     "qwen":   "vision-model",
 }
 
+# ── Ollama (local) ────────────────────────────────────────────
+OLLAMA_BASE_URL      = "http://localhost:11434"
+OLLAMA_DEFAULT_MODEL = "llama3.2"
+
 # Named constant — immune to KNOWN_MODELS list reordering
 SONNET_MODEL = KNOWN_MODELS["claude"][0]   # "claude-sonnet-4-6"
 
@@ -150,6 +160,7 @@ AGENT_CLI_CMDS = {
         ("/init",     "⚡", "Инициализация проекта"),
     ],
     "openrouter": [],
+    "ollama":      [],
 }
 
 # ── Установка агентов ─────────────────────────────────────────
@@ -186,6 +197,7 @@ AGENT_NAMES = {
     "openrouter":  "OpenRouter",
     "gemini":      "Gemini",
     "qwen":        "Qwen",
+    "ollama":      "Ollama",
 }
 
 

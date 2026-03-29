@@ -25,6 +25,8 @@ from config import (
     OPENROUTER_API_KEY, OPENROUTER_KEY_FILE, OPENROUTER_MODELS_CACHE,
     GEMINI_FALLBACK_MODELS, CTX_LIMITS, _AGENT_TIMEOUT,
     STATE_DIR, WORK_DIR, ARCHIVE_DIR, SETUP_DONE_FILE,
+    OLLAMA_BASE_URL, OLLAMA_DEFAULT_MODEL,
+    OLLAMA_SESSION, OLLAMA_CTX_FILE,
 )
 from context import (
     get_model, set_model, agent_label,
@@ -490,6 +492,16 @@ def check_agents() -> dict[str, dict]:
             result[ag] = {"ok": True, "path": path, "version": ver}
         else:
             result[ag] = {"ok": False, "path": None, "version": None}
+    # Check Ollama availability (local HTTP service, not a CLI binary)
+    ollama_models = get_ollama_models()
+    if ollama_models:
+        result["ollama"] = {
+            "ok": True,
+            "path": OLLAMA_BASE_URL,
+            "version": f"{len(ollama_models)} model(s): {', '.join(ollama_models[:3])}",
+        }
+    else:
+        result["ollama"] = {"ok": False, "path": None, "version": None}
     return result
 
 
@@ -702,6 +714,65 @@ def ask_openrouter(prompt: str, file_path: str | None = None) -> str:
         return f"❌ OpenRouter ошибка: {e}"
 
 
+# ── OLLAMA (LOCAL) ────────────────────────────────────────────
+
+def get_ollama_models() -> list[str]:
+    """Fetch available models from local Ollama instance."""
+    try:
+        r = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5,
+                         proxies={"http": None, "https": None})
+        return [m["name"] for m in r.json().get("models", [])]
+    except Exception:
+        return []
+
+
+def ask_ollama(prompt: str, file_path: str | None = None) -> str:
+    """Call local Ollama via its OpenAI-compatible endpoint."""
+    model = get_model("ollama") or OLLAMA_DEFAULT_MODEL
+
+    # Build message list: shared context + user prompt
+    messages = shared_ctx_for_api()
+    if not messages or messages[-1]["content"] != prompt:
+        messages.append({"role": "user", "content": prompt})
+
+    # Inject global memory as system message if present
+    mem = global_ctx_for_prompt()
+    if mem:
+        messages.insert(0, {"role": "system", "content": mem})
+
+    try:
+        log_info(f"→ Ollama [{model}] prompt={len(prompt)}ch")
+        t = time.time()
+        # proxies=None bypasses HTTP_PROXY — Ollama is local, no proxy needed
+        r = requests.post(
+            f"{OLLAMA_BASE_URL}/v1/chat/completions",
+            json={"model": model, "messages": messages, "stream": False},
+            timeout=_AGENT_TIMEOUT.get("ollama", 120),
+            proxies={"http": None, "https": None},
+        )
+        data = r.json()
+        elapsed = time.time() - t
+        if "error" in data:
+            return f"❌ Ollama: {data['error']}"
+        reply = data["choices"][0]["message"]["content"]
+        log_info(f"← Ollama {elapsed:.1f}s reply={len(reply)}ch")
+        total = _add_ctx(OLLAMA_CTX_FILE, len(prompt) + len(reply))
+        ctx_warn, ctx_archive = CTX_LIMITS.get("ollama", (60_000, 200_000))
+        if total >= ctx_archive:
+            _reset_session(OLLAMA_SESSION, OLLAMA_CTX_FILE)
+            from ui import tg_send
+            tg_send(f"🗄 Ollama: контекст архивирован. Новая сессия.")
+        elif total >= ctx_warn:
+            from ui import tg_send
+            tg_send(f"⚠️ Ollama: контекст {total // 1000}k/{ctx_archive // 1000}k симв.")
+        return reply
+    except requests.exceptions.ConnectionError:
+        return "❌ Ollama недоступна. Убедитесь что запущен: ollama serve"
+    except Exception as e:
+        log_error("Ollama exception", e)
+        return f"❌ Ollama ошибка: {e}"
+
+
 # ── OPENROUTER: ПОИСК МОДЕЛЕЙ ─────────────────────────────────
 def _or_fetch_models() -> list[dict]:
     """Загружает список моделей OpenRouter, кэширует на OR_MODELS_TTL секунд."""
@@ -798,3 +869,7 @@ async def async_ask_qwen(prompt: str, file_path: str | None = None) -> str:
 
 async def async_ask_openrouter(prompt: str, file_path: str | None = None) -> str:
     return await asyncio.to_thread(ask_openrouter, prompt, file_path)
+
+
+async def async_ask_ollama(prompt: str, file_path: str | None = None) -> str:
+    return await asyncio.to_thread(ask_ollama, prompt, file_path)
