@@ -286,9 +286,17 @@ def get_display(agent: str) -> str:
         icon = "🔴" if pct < 10 else ("🟡" if pct < 40 else "🟢")
         return f"{icon} {pct}% {dim.upper()}"
 
-    # 4. Claude: heuristic is NOT shown in the agent label — it only counts
-    #    requests through this bot and gives a false sense of remaining quota.
-    #    Real data comes from CLI parsing or /limit manual entry (cases 1 & 2).
+    # 4. Claude: show bot request counts for the 5h and weekly windows.
+    #    Displayed as raw counts (not %), so it's clear these are bot-only numbers.
+    #    Real remaining quota: use /usage or /limit after checking claude.ai/usage.
+    if agent == "claude":
+        est = get_safe_estimate(agent)
+        c5 = est["5h_count"]
+        cw = est["week_count"]
+        lim5 = est["5h_limit"]
+        limw = est["week_limit"]
+        icon5 = "🔴" if c5 >= lim5 * 0.9 else ("🟡" if c5 >= lim5 * 0.7 else "🟢")
+        return f"{icon5} {c5}/{lim5}·5h  {cw}/{limw}·wk"
 
     # 5. Gemini RPD tracking — always show (even 0 prompts) so agent_label()
     #    never falls back to the misleading ctx_pct() indicator
