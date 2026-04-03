@@ -952,7 +952,22 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
     if text == "/stats":
         import rate_tracker as _rt
         agent = get_active()
-        tg_send(_rt.get_agent_stats(agent))
+        if agent == "claude":
+            mid = tg_send("⏳ Читаю /config Usage...")
+            def _do_claude_stats(m=mid):
+                result = _rt.fetch_claude_usage_from_cli()
+                if result["ok"]:
+                    s_used = result["session_used"]
+                    w_used = result["week_used"]
+                    s_rem = max(0, 100 - s_used)
+                    w_rem = max(0, 100 - w_used)
+                    pct = min(s_rem, w_rem)
+                    label = "5h" if s_rem <= w_rem else "week"
+                    _rt.set_manual("claude", pct, label)
+                tg_edit(m, _rt.get_agent_stats(agent))
+            threading.Thread(target=_do_claude_stats, daemon=True).start()
+        else:
+            tg_send(_rt.get_agent_stats(agent))
         return
 
     # /usage <session%_used> <week%_used>

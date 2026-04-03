@@ -80,6 +80,71 @@ def _save_to_db():
 _load_from_db()
 
 
+# ── CLAUDE /config PTY парсинг ────────────────────────────────
+
+def fetch_claude_usage_from_cli() -> dict:
+    """
+    Запускает `claude` в PTY, открывает /config → Usage вкладку,
+    парсит '37% used' для сессии и недели.
+    Возвращает {"session_used": N, "week_used": N, "ok": True}
+    или {"ok": False, "error": "..."}.
+    Блокирующий вызов, занимает ~8-10 секунд.
+    """
+    try:
+        import pexpect, re as _re
+        from config import CLAUDE_BIN
+
+        def _clean(t):
+            return _re.sub(r'\x1b\[[0-9;?]*[a-zA-Z]|\x1b[=>]|\r|\x1b\][^\x07]*\x07', '', t)
+
+        child = pexpect.spawn(
+            f"{CLAUDE_BIN} --dangerously-skip-permissions",
+            encoding="utf-8", timeout=40, echo=False,
+            dimensions=(50, 200)
+        )
+        try:
+            child.expect(r"❯", timeout=30)
+            import time as _time; _time.sleep(2)
+        except Exception:
+            pass
+
+        child.send("/config\r")
+        try:
+            child.expect("compact", timeout=10)
+            import time as _time; _time.sleep(0.5)
+        except Exception:
+            pass
+
+        # ↑ к табам → → Usage (один раз вправо от Config)
+        child.send("\x1b[A")
+        import time as _time; _time.sleep(0.5)
+        child.send("\x1b[C")
+        _time.sleep(5)  # ждём загрузки Usage данных
+
+        output = ""
+        for _ in range(50):
+            try:
+                output += child.read_nonblocking(size=8192, timeout=0.3)
+            except Exception:
+                break
+
+        child.send("\x1b")
+        child.close(force=True)
+
+        text = _clean(output)
+        # "37%used" или "37% used"
+        s_m = _re.search(r'Current session[^%]*?(\d{1,3})\s*%\s*used', text, _re.I)
+        w_m = _re.search(r'Current week[^%]*?(\d{1,3})\s*%\s*used', text, _re.I)
+
+        if s_m and w_m:
+            s_used = int(s_m.group(1))
+            w_used = int(w_m.group(1))
+            return {"session_used": s_used, "week_used": w_used, "ok": True}
+        return {"ok": False, "error": f"Pattern not found in: {text[200:400]!r}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 # ── CLAUDE stats-cache.json ────────────────────────────────────
 
 def get_claude_real_usage() -> dict:
