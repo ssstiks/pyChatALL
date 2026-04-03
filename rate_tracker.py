@@ -4,7 +4,9 @@ rate_tracker.py — Rate Limit Tracker for Claude, Gemini and Qwen.
 
 Claude:
   1. Пассивный парсинг CLI (Source of Truth): "10 messages remaining until 3:00 PM"
-  2. Локальная эвристика (Fallback): Подсчет запросов в БД за 5-часовое окно (лимит ~45).
+  2. stats-cache.json (~/.claude/stats-cache.json) — реальные данные Claude Code CLI
+     (все сессии, не только через бота). Показывает messageCount за 5ч и неделю.
+  3. Ручной ввод (/usage, /limit) — процент остатка введённый вручную.
 
 Gemini:
   Квота Code Assist API: 1500 RPD (сброс в 10:00 МСК / 07:00 UTC).
@@ -26,8 +28,8 @@ _GEMINI_RPM_LIMIT   = 18     # RPM порог: при приближении —
 _MSK_OFFSET         = 3 * 3600   # UTC+3
 _GEMINI_RESET_HOUR  = 10         # 10:00 МСК
 
-# ── Claude Pro эвристика ─────────────────────────────────────
-_CLAUDE_LIMIT_5H    = 45     # ~45 сообщений за 5-часовое окно (Claude Pro)
+# ── Claude Pro лимиты (приблизительные, зависят от модели) ───
+_CLAUDE_LIMIT_5H    = 45     # ~45 сообщений за 5-часовое окно (Claude Pro Sonnet)
 _CLAUDE_LIMIT_WEEK  = 400    # ~400 сообщений в неделю (Claude Pro)
 
 # ── Qwen квота ────────────────────────────────────────────────
@@ -37,6 +39,7 @@ _QWEN_PROMPT_CRIT   = 950
 _QWEN_RESET_HOUR    = 3      # 03:00 МСК (00:00 UTC)
 
 import json
+import os
 import time
 import threading
 import logging
@@ -46,6 +49,9 @@ from typing import Optional, Dict, Any
 
 _lock = threading.Lock()
 _logger = logging.getLogger("rate_tracker")
+
+# Путь к файлу статистики Claude Code CLI (все сессии, не только через бот)
+_CLAUDE_STATS_CACHE = os.path.expanduser("~/.claude/stats-cache.json")
 
 # In-memory state
 _state: dict[str, dict] = {}
@@ -72,6 +78,39 @@ def _save_to_db():
         _logger.warning("rate_tracker: failed to save state to DB: %s", e)
 
 _load_from_db()
+
+
+# ── CLAUDE stats-cache.json ────────────────────────────────────
+
+def get_claude_real_usage() -> dict:
+    """
+    Читает ~/.claude/stats-cache.json и возвращает реальное кол-во сообщений
+    Claude Code CLI за последние ~5ч (сегодня) и 7 дней.
+
+    Возвращает: {"today": N, "week": N, "ok": True/False}
+    """
+    try:
+        with open(_CLAUDE_STATS_CACHE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        daily = data.get("dailyActivity", [])
+        now = datetime.now()
+        today_str = now.strftime("%Y-%m-%d")
+        week_ago = (now - timedelta(days=7)).strftime("%Y-%m-%d")
+
+        today_count = 0
+        week_count = 0
+        for entry in daily:
+            d = entry.get("date", "")
+            n = entry.get("messageCount", 0)
+            if d == today_str:
+                today_count = n
+            if d >= week_ago:
+                week_count += n
+        return {"today": today_count, "week": week_count, "ok": True}
+    except Exception as e:
+        _logger.debug("stats-cache.json read failed: %s", e)
+        return {"today": 0, "week": 0, "ok": False}
+
 
 # ── ПАССИВНЫЙ ПАРСИНГ ──────────────────────────────────────────
 
@@ -172,13 +211,16 @@ def get_all_status() -> str:
             lines.append(f"  • {icon} {pct}% ({lbl})")
             lines.append(f"  _Введено {age_h:.1f}ч назад_")
         else:
-            est = get_safe_estimate(agent)
-            lines.append("❓ *Реальный остаток неизвестен*")
-            lines.append(f"  • Через бот за 5ч: {est['5h_count']} запр.")
-            lines.append(f"  • Через бот за неделю: {est['week_count']} запр.")
-            lines.append("  _Это только запросы через бота — не отражает реальный лимит._")
-            lines.append("  Введи % вручную с [claude.ai/usage](https://claude.ai/usage):")
-            lines.append("  `/limit claude 65 week`")
+            usage = get_claude_real_usage()
+            if usage["ok"]:
+                lines.append("📊 *Активность Claude Code (все сессии):*")
+                lines.append(f"  • Сегодня: *{usage['today']}* событий")
+                lines.append(f"  • За 7 дней: *{usage['week']}* событий")
+                lines.append("  _Считаются все события (user+assistant+tools) — не то же самое, что лимит Pro_")
+            else:
+                lines.append("❓ _stats-cache.json не найден_")
+            lines.append("  Реальный % лимита → `/config` в Claude Code, затем:")
+            lines.append("  `/usage 45 62` _(session% used, week% used)_")
 
     # OpenRouter — из headers (если есть свежие)
     with _lock:
@@ -286,17 +328,13 @@ def get_display(agent: str) -> str:
         icon = "🔴" if pct < 10 else ("🟡" if pct < 40 else "🟢")
         return f"{icon} {pct}% {dim.upper()}"
 
-    # 4. Claude: show bot request counts for the 5h and weekly windows.
-    #    Displayed as raw counts (not %), so it's clear these are bot-only numbers.
-    #    Real remaining quota: use /usage or /limit after checking claude.ai/usage.
+    # 4. Claude: real usage from ~/.claude/stats-cache.json
+    #    messageCount = all events (user+assistant+tools), NOT comparable to Pro limits.
+    #    Shown as raw info only — real % comes from /config → /usage command.
     if agent == "claude":
-        est = get_safe_estimate(agent)
-        c5 = est["5h_count"]
-        cw = est["week_count"]
-        lim5 = est["5h_limit"]
-        limw = est["week_limit"]
-        icon5 = "🔴" if c5 >= lim5 * 0.9 else ("🟡" if c5 >= lim5 * 0.7 else "🟢")
-        return f"{icon5} {c5}/{lim5}·5h  {cw}/{limw}·wk"
+        usage = get_claude_real_usage()
+        if usage["ok"]:
+            return f"📊 {usage['today']}сег  {usage['week']}нед"
 
     # 5. Gemini RPD tracking — always show (even 0 prompts) so agent_label()
     #    never falls back to the misleading ctx_pct() indicator
