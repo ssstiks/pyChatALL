@@ -45,7 +45,7 @@ from config import (
     QWEN_SESSION, QWEN_CTX_FILE,
     OPENROUTER_KEY_FILE,
     _AGENT_TIMEOUT, _last_request as _last_request_cfg,
-    CTX_LIMITS, KNOWN_MODELS, DEFAULT_MODELS, AGENT_CLI_CMDS,
+    CTX_LIMITS, KNOWN_MODELS, DEFAULT_MODELS, AGENT_CLI_CMDS, SHARED_CTX_MSGS,
     _lock, ensure_dirs,
 )
 from logger import (
@@ -55,7 +55,7 @@ from logger import (
 from context import (
     get_model, set_model, agent_label, ctx_pct, cmd_model,
     get_active, set_active,
-    shared_ctx_load, shared_ctx_save, shared_ctx_add, shared_ctx_clear,
+    shared_ctx_load, shared_ctx_add, shared_ctx_clear,
     shared_ctx_for_prompt, shared_ctx_for_api,
     _load_session, _save_session, _get_ctx, _add_ctx, _reset_session,
     claude_rate_set, claude_rate_until, claude_rate_msg, _detect_rate_limit,
@@ -223,7 +223,7 @@ def cmd_ctx() -> str:
     lines = [
         "📊 Контекст:",
         f"  Общий лог: {len(log_list)} сообщ. / {shared_total // 1000}k симв",
-        f"  (Передаётся последних {20} сообщений)",
+        f"  (Передаётся последних {SHARED_CTX_MSGS} сообщений)",
         "",
     ]
     for agent_key, agent_label_str, sf, cf in [
@@ -292,19 +292,22 @@ def _do_export(mode: str, msg_id: int | None) -> None:
 
         size_mb = size / (1024 * 1024)
         if size_mb < 48:
-            # Send via Telegram
             import requests as _req
-            from config import API, ALLOWED_CHAT
             send_url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
-            with open(path, "rb") as f:
-                _req.post(
-                    send_url,
-                    data={"chat_id": ALLOWED_CHAT,
-                          "caption": f"📦 {os.path.basename(path)} ({size_mb:.1f} МБ)"},
-                    files={"document": f},
-                    timeout=120,
-                )
-            os.remove(path)
+            try:
+                with open(path, "rb") as f:
+                    _req.post(
+                        send_url,
+                        data={"chat_id": ALLOWED_CHAT,
+                              "caption": f"📦 {os.path.basename(path)} ({size_mb:.1f} МБ)"},
+                        files={"document": f},
+                        timeout=120,
+                    )
+            finally:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
         else:
             tg_send(
                 f"📦 Архив создан: `{path}`\n"

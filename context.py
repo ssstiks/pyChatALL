@@ -244,11 +244,6 @@ def shared_ctx_load() -> list:
         return []
 
 
-def shared_ctx_save(log_list: list) -> None:
-    """Legacy no-op kept for import compatibility."""
-    pass
-
-
 def shared_ctx_clear() -> None:
     """Delete all shared context messages from the database."""
     with _lock:
@@ -260,12 +255,6 @@ def shared_ctx_clear() -> None:
             log_error(f"Failed to clear messages: {e}")
 
 
-_NOISE_PATTERNS = re.compile(
-    r'^(\s*[\da-f]{2}([\s:,][\da-f]{2}){7,})'  # hex dumps
-    r'|^(\s*[\[{<].*?(error|warn|debug|info|trace).*?[\]}>]\s*)$'  # bare log lines
-    r'|^\s*(ok|done|yes|no|ok\.?|готово|принял|запустил|ок)\s*$',  # CLI acks
-    re.IGNORECASE | re.DOTALL,
-)
 _MAX_MESSAGES = 100 # Уменьшаем с 200 до 100 для экономии
 _MAX_CONTENT_LEN = 600 # Уменьшаем с 1000 до 600
 _TRUNCATE_HEAD = 300

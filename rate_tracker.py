@@ -55,7 +55,8 @@ def _load_from_db():
         if raw:
             global _state
             _state = json.loads(raw)
-    except: pass
+    except Exception as e:
+        _logger.warning("rate_tracker: failed to load state from DB: %s", e)
 
 def _save_to_db():
     try:
@@ -63,7 +64,8 @@ def _save_to_db():
         from db_manager import Database
         db = Database(DB_PATH)
         db.set_setting("rate_tracker_state_safe", json.dumps(_state, ensure_ascii=False))
-    except: pass
+    except Exception as e:
+        _logger.warning("rate_tracker: failed to save state to DB: %s", e)
 
 _load_from_db()
 
