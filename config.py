@@ -5,21 +5,62 @@
 """
 
 import os
+import shutil
 import threading
 import pathlib
 
 # ════════════════════════════════════════
 #  TELEGRAM + АГЕНТЫ
 # ════════════════════════════════════════
-BOT_TOKEN    = os.getenv("TG_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
-ALLOWED_CHAT = YOUR_TELEGRAM_ID
+BOT_TOKEN    = os.getenv("TG_BOT_TOKEN", "")
+ALLOWED_CHAT = int(os.getenv("TG_ALLOWED_CHAT", "0"))  # set your Telegram user ID
 
 OPENROUTER_API_KEY = ""  # fallback если нет файла; лучше задать через бот
 
-CLAUDE_BIN  = "/home/stx/.local/bin/claude"
-GEMINI_BIN  = "/home/stx/.nvm/versions/node/v22.20.0/bin/gemini"
-QWEN_BIN    = "/home/stx/.nvm/versions/node/v22.20.0/bin/qwen"
-WORK_DIR    = "/home/stx/Applications/progect/shadowchat"
+# ── Автоопределение бинарников агентов ───────────────────────
+_HOME = os.path.expanduser("~")
+
+
+def _nvm_bin() -> str:
+    """Возвращает путь к bin последней установленной версии Node.js через nvm."""
+    nvm_dir = os.path.join(_HOME, ".nvm", "versions", "node")
+    if os.path.isdir(nvm_dir):
+        versions = sorted(
+            (v for v in os.listdir(nvm_dir) if os.path.isdir(os.path.join(nvm_dir, v))),
+            reverse=True,
+        )
+        if versions:
+            return os.path.join(nvm_dir, versions[0], "bin")
+    return ""
+
+
+_NVM = _nvm_bin()
+
+CLAUDE_BIN = (
+    shutil.which("claude")
+    or os.path.join(_HOME, ".local", "bin", "claude")
+)
+GEMINI_BIN = (
+    shutil.which("gemini")
+    or (os.path.join(_NVM, "gemini") if _NVM else "gemini")
+)
+QWEN_BIN = (
+    shutil.which("qwen")
+    or (os.path.join(_NVM, "qwen") if _NVM else "qwen")
+)
+# WORK_DIR: directory the bot treats as its workspace.
+# Defaults to a saved path (work_dir.txt), then falls back to the bot's own
+# directory so the bot is self-contained wherever it is deployed.
+_WORK_DIR_FILE = str(pathlib.Path.home() / ".local" / "share" / "pyChatALL" / "work_dir.txt")
+def _load_work_dir() -> str:
+    try:
+        p = open(_WORK_DIR_FILE).read().strip()
+        if p and os.path.isdir(p):
+            return p
+    except FileNotFoundError:
+        pass
+    return os.path.dirname(os.path.abspath(__file__))
+WORK_DIR = _load_work_dir()
 
 # ── Файлы состояния ───────────────────────────────────────────
 # Использование постоянного хранилища в home (сохранится при перезагрузке)
@@ -44,6 +85,15 @@ SHARED_CTX_FILE  = f"{STATE_DIR}/shared_context.json"
 ARCHIVE_DIR      = f"{STATE_DIR}/archive"
 DOWNLOAD_DIR     = f"{STATE_DIR}/downloads"
 WORKSPACE_DL_DIR = f"{WORK_DIR}/.tg_downloads"
+
+# ── Изолированные рабочие папки агентов ──────────────────────
+# Каждый агент работает в своей папке — не видит файлы бота и
+# других проектов, не тратит API-квоту на сканирование лишнего.
+WORKSPACES_DIR    = f"{STATE_DIR}/workspaces"
+CLAUDE_WORKSPACE  = f"{WORKSPACES_DIR}/claude"
+GEMINI_WORKSPACE  = f"{WORKSPACES_DIR}/gemini"
+QWEN_WORKSPACE    = f"{WORKSPACES_DIR}/qwen"
+PROJECTS_WORKSPACE = f"{WORKSPACES_DIR}/projects"
 CLAUDE_RATE_FILE = f"{STATE_DIR}/claude_rate_until.txt"
 MEMORY_FILE      = f"{STATE_DIR}/memory.md"
 DISCUSS_FILE     = f"{STATE_DIR}/discuss_agents.json"
@@ -145,12 +195,9 @@ SONNET_MODEL = KNOWN_MODELS["claude"][0]   # "claude-sonnet-4-6"
 # ── CLI-команды каждого агента ────────────────────────────────
 AGENT_CLI_CMDS = {
     "claude": [
-        ("/compact",  "🗜", "Сжать контекст"),
-        ("/clear",    "🗑", "Очистить историю"),
-        ("/doctor",   "🔍", "Диагностика"),
         ("/cost",     "💰", "Стоимость токенов"),
-        ("/status",   "📡", "Статус сессии"),
-        ("/config",   "⚙️", "Конфигурация"),
+        ("/review",   "🔍", "Code review (PR)"),
+        ("/init",     "⚡", "Инициализация CLAUDE.md"),
     ],
     "gemini": [],
     "qwen": [
@@ -165,8 +212,8 @@ AGENT_CLI_CMDS = {
 
 # ── Установка агентов ─────────────────────────────────────────
 _AGENT_SEARCH_PATHS = [
-    "/home/stx/.local/bin",
-    "/home/stx/.nvm/versions/node/v22.20.0/bin",
+    os.path.join(_HOME, ".local", "bin"),
+    *([_NVM] if _NVM else []),
     "/usr/local/bin",
     "/usr/bin",
 ]
@@ -209,7 +256,8 @@ DB_PATH = os.path.expanduser("~/.local/share/pyChatALL/pychatall.db")
 def ensure_dirs() -> None:
     """Создаёт необходимые директории если их нет."""
     import os
-    for d in (STATE_DIR, ARCHIVE_DIR, DOWNLOAD_DIR, WORKSPACE_DL_DIR):
+    for d in (STATE_DIR, ARCHIVE_DIR, DOWNLOAD_DIR, WORKSPACE_DL_DIR,
+              CLAUDE_WORKSPACE, GEMINI_WORKSPACE, QWEN_WORKSPACE, PROJECTS_WORKSPACE):
         os.makedirs(d, exist_ok=True)
 
 

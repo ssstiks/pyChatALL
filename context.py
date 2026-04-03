@@ -203,7 +203,7 @@ def _reset_session(session_file: str, ctx_file: str) -> None:
 def get_active() -> str:
     try:
         a = db.get_setting('active_agent') or 'claude'
-        if a in ("claude", "openrouter", "gemini", "qwen"):
+        if a in ("claude", "openrouter", "gemini", "qwen", "ollama"):
             return a
     except Exception:
         pass

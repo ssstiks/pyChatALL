@@ -908,7 +908,19 @@ def send_project_list_menu(message_id: int | None = None):
     projects = _list_projects()
     cur      = _cur_project()
 
-    if not projects:
+    # Detect stale current project: set in state.json but dir no longer exists.
+    cur_missing = bool(cur and cur not in projects)
+
+    if cur_missing:
+        cur_dir = os.path.join(PROJECTS_DIR, cur)
+        warning = (
+            f"⚠️ Текущий проект «{cur}» не найден:\n"
+            f"`{cur_dir}`\n\n"
+        )
+    else:
+        warning = ""
+
+    if not projects and not cur_missing:
         text = "📂 Проектов пока нет\n\nСоздай первый проект!"
         rows = [
             [("🆕 Создать проект", "team_new_project")],
@@ -920,9 +932,11 @@ def send_project_list_menu(message_id: int | None = None):
             info = _project_info(p)
             mark = "▶ " if p == cur else ""
             lines.append(f"  {mark}{p}" + (f"  — {info}" if info else ""))
-        text = "\n".join(lines)
+        text = warning + "\n".join(lines)
 
         rows = []
+        if cur_missing:
+            rows.append([(f"🗑 Убрать «{cur}» из состояния", "team_clear_project")])
         for p in projects:
             mark  = "▶️ " if p == cur else ""
             label = f"{mark}{p}"
@@ -944,18 +958,31 @@ def send_new_task_menu(message_id: int | None = None):
     proj_dir = _project_dir(proj) if proj else None
 
     if proj:
-        text = (
-            f"🚀 Новая задача\n\n"
-            f"📁 Текущий проект: {proj}\n"
-            f"📂 Папка: {proj_dir}\n\n"
-            f"Продолжить в этом проекте или выбрать другой?"
-        )
-        rows = [
-            [(f"▶️ Задачу в «{proj}»", "team_task_in_cur")],
-            [("🆕 Новый проект", "team_new_project")],
-            [("📂 Другой проект", "team_project_list"),
-             ("← Назад", "team_menu")],
-        ]
+        dir_exists = proj_dir and os.path.isdir(proj_dir)
+        if not dir_exists:
+            text = (
+                f"⚠️ Проект «{proj}» не найден на диске:\n"
+                f"`{proj_dir}`\n\n"
+                "Папка удалена или WORK_DIR изменился."
+            )
+            rows = [
+                [("🗑 Убрать из состояния", "team_clear_project")],
+                [("📂 Список проектов", "team_project_list"),
+                 ("← Назад", "team_menu")],
+            ]
+        else:
+            text = (
+                f"🚀 Новая задача\n\n"
+                f"📁 Текущий проект: {proj}\n"
+                f"📂 Папка: {proj_dir}\n\n"
+                f"Продолжить в этом проекте или выбрать другой?"
+            )
+            rows = [
+                [(f"▶️ Задачу в «{proj}»", "team_task_in_cur")],
+                [("🆕 Новый проект", "team_new_project")],
+                [("📂 Другой проект", "team_project_list"),
+                 ("← Назад", "team_menu")],
+            ]
     else:
         text = (
             "🚀 Новая задача\n\n"
@@ -1315,6 +1342,16 @@ def handle_team_callback(cb_id: str, msg_id: int, data: str):
 
     elif data == "team_project_list":
         _bot.tg_answer_cb(cb_id)
+        send_project_list_menu(msg_id)
+
+    elif data == "team_clear_project":
+        # Remove stale project reference from state (dir no longer exists)
+        with _team_lock:
+            s = _load_state()
+            old = s.get("project", "?")
+            s["project"] = ""
+            _save_state(s)
+        _bot.tg_answer_cb(cb_id, f"🗑 «{old}» убран")
         send_project_list_menu(msg_id)
 
     elif data.startswith("team_switch_project:"):

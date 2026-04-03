@@ -332,21 +332,28 @@ def send_agent_menu() -> None:
     active = get_active()
     m_active = get_model(active) if active != "openrouter" else "API"
     lines = [f"🤖 Активный: {AGENT_NAMES[active]} ({m_active})", ""]
-    for ag in ("claude", "gemini", "qwen", "openrouter"):
+    for ag in ("claude", "gemini", "qwen", "openrouter", "ollama"):
         mark = "▶" if ag == active else " "
-        m = get_model(ag) if ag != "openrouter" else "API"
+        m = get_model(ag) if ag not in ("openrouter",) else "API"
         limit_str = rate_tracker.get_display(ag)
         limit_info = f" — {limit_str}" if limit_str else ""
         lines.append(f"  {mark} {AGENT_NAMES[ag]} ({m}){limit_info}")
 
+    from agents import get_gemini_lite
+    lite = get_gemini_lite()
+    lite_lbl = "💬 Gemini: Лайт ✓" if lite else "🌲 Gemini: Код"
+
     buttons = [
-        [("🔵 Claude", "agent:claude"),    ("🟢 Gemini",     "agent:gemini")],
-        [("🟡 Qwen",   "agent:qwen"),      ("🌐 OpenRouter", "agent:openrouter")],
-        [("📋 Команды агента", "cmd:cmds"), ("🔧 Модели",    "cmd:models")],
-        [("💬 Обсуждение",   "cmd:discuss"), ("🗑 Сброс",    "cmd:reset_menu")],
-        [("📊 Контекст", "cmd:ctx"),        ("🧠 Память",    "cmd:memory")],
-        [("👥 Команда агентов", "cmd:team"), ("🔧 Установка", "setup_check")],
-        [("❓ Помощь",        "cmd:help")],
+        [("🔵 Claude", "agent:claude"),     ("🟢 Gemini",      "agent:gemini")],
+        [("🟡 Qwen",   "agent:qwen"),       ("🌐 OpenRouter",  "agent:openrouter")],
+        [("🦙 Ollama", "agent:ollama"),     ("⚙️ Ollama",      "ollama:panel")],
+        [(lite_lbl,                          "gemini:toggle_lite")],
+        [("📋 Команды", "cmd:cmds"),        ("🔧 Модели",      "cmd:models")],
+        [("💬 Обсуждение", "cmd:discuss"),  ("🗑 Сброс",       "cmd:reset_menu")],
+        [("📊 Контекст", "cmd:ctx"),        ("🧠 Память",      "cmd:memory")],
+        [("👥 Команда", "cmd:team"),        ("🔧 Установка",   "setup_check")],
+        [("📦 Экспорт", "cmd:export"),      ("⚙️ Пути",        "cmd:settings")],
+        [("❓ Помощь",  "cmd:help")],
     ]
     tg_send("\n".join(lines), kb(buttons))
 
@@ -390,7 +397,22 @@ def send_model_menu(agent: str, message_id: int | None = None) -> None:
         send_or_model_menu(message_id)
         return
     current = get_model(agent)
-    known = KNOWN_MODELS.get(agent, [])
+    if agent == "ollama":
+        from agents import get_ollama_models
+        known = get_ollama_models()
+        if not known:
+            text = "❌ Ollama недоступна или моделей нет.\nЗапустите: ollama serve"
+            markup = kb([[("« Назад", "cmd:agent_menu")]])
+            if message_id:
+                tg_edit(message_id, text, markup)
+            else:
+                tg_send(text, markup)
+            return
+    elif agent in ("claude", "gemini", "qwen"):
+        from agents import get_cli_models
+        known = get_cli_models(agent)
+    else:
+        known = KNOWN_MODELS.get(agent, [])
     text = f"🔧 {AGENT_NAMES[agent]} — выбери модель\nТекущая: {current}"
 
     rows = []
@@ -409,13 +431,177 @@ def send_model_menu(agent: str, message_id: int | None = None) -> None:
         tg_send(text, markup)
 
 
+# ── OLLAMA PANEL ─────────────────────────────────────────────
+
+# Popular models with rough download sizes
+_OLLAMA_POPULAR = [
+    ("qwen3:1.7b",    "~1.1 ГБ"),
+    ("qwen3:7b",      "~4.7 ГБ"),
+    ("llama3.2:3b",   "~2.0 ГБ"),
+    ("llama3.1:8b",   "~4.7 ГБ"),
+    ("mistral:7b",    "~4.1 ГБ"),
+    ("phi4-mini",     "~2.5 ГБ"),
+    ("gemma3:4b",     "~2.5 ГБ"),
+    ("codellama:7b",  "~3.8 ГБ"),
+    ("deepseek-r1:7b","~4.7 ГБ"),
+]
+
+
+def _disk_free_str() -> str:
+    import shutil
+    free = shutil.disk_usage("/").free / (1024 ** 3)
+    return f"{free:.1f} ГБ"
+
+
+def send_ollama_panel(message_id: int | None = None) -> None:
+    """Главная панель управления Ollama."""
+    from agents import get_ollama_models
+    installed = get_ollama_models()
+    current   = get_model("ollama") or "не задана"
+    free      = _disk_free_str()
+
+    lines = ["🦙 *Ollama — управление моделями*", f"Активная: `{current}` | Диск: {free} свободно"]
+    if installed:
+        lines.append("Установлено: " + ", ".join(f"`{m}`" for m in installed))
+    else:
+        lines.append("_Моделей нет — скачай первую ниже_")
+
+    buttons = [
+        [("📋 Установленные",  "ollama:list"),      ("⬇️ Скачать модель", "ollama:pull_menu")],
+        [("🗑 Удалить модель",  "ollama:rm_menu"),   ("🌐 Каталог",        "ollama:library")],
+        [("« Назад",           "cmd:agent_menu")],
+    ]
+    markup = kb(buttons)
+    if message_id:
+        tg_edit(message_id, "\n".join(lines), markup)
+    else:
+        tg_send("\n".join(lines), markup)
+
+
+def send_ollama_installed_menu(message_id: int | None = None) -> None:
+    """Список установленных моделей с кнопками выбора."""
+    from agents import get_ollama_models
+    installed = get_ollama_models()
+    current   = get_model("ollama")
+
+    if not installed:
+        text = "🦙 Моделей нет.\nСкачай первую: ⬇️ Скачать модель"
+        markup = kb([[("⬇️ Скачать модель", "ollama:pull_menu"), ("« Назад", "ollama:panel")]])
+        if message_id:
+            tg_edit(message_id, text, markup)
+        else:
+            tg_send(text, markup)
+        return
+
+    rows = []
+    for m in installed:
+        label = f"✓ {m}" if m == current else m
+        rows.append([(label, f"model:ollama:{m}")])
+    rows.append([("« Назад", "ollama:panel")])
+
+    text = "🦙 *Установленные модели Ollama*\nНажми чтобы выбрать активную:"
+    markup = kb(rows)
+    if message_id:
+        tg_edit(message_id, text, markup)
+    else:
+        tg_send(text, markup)
+
+
+def send_ollama_pull_menu(message_id: int | None = None) -> None:
+    """Меню скачивания — популярные модели + ручной ввод."""
+    import shutil
+    free_gb = shutil.disk_usage("/").free / (1024 ** 3)
+    text = (
+        f"⬇️ *Скачать модель Ollama*\n"
+        f"Свободно на диске: {free_gb:.1f} ГБ\n\n"
+        f"Выбери популярную или отправь команду:\n"
+        f"`ollama pull <model>`\n\n"
+        f"[Все модели →](https://ollama.com/library)"
+    )
+    rows = []
+    for i in range(0, len(_OLLAMA_POPULAR), 2):
+        row = []
+        for name, size in _OLLAMA_POPULAR[i:i + 2]:
+            row.append((f"{name} {size}", f"ollama:pull:{name}"))
+        rows.append(row)
+    rows.append([("« Назад", "ollama:panel")])
+
+    markup = kb(rows)
+    if message_id:
+        tg_edit(message_id, text, markup)
+    else:
+        tg_send(text, markup)
+
+
+def send_ollama_rm_menu(message_id: int | None = None) -> None:
+    """Меню удаления установленных моделей."""
+    from agents import get_ollama_models
+    installed = get_ollama_models()
+
+    if not installed:
+        text = "🦙 Нечего удалять — моделей нет."
+        markup = kb([[("« Назад", "ollama:panel")]])
+        if message_id:
+            tg_edit(message_id, text, markup)
+        else:
+            tg_send(text, markup)
+        return
+
+    rows = [[("🗑 " + m, f"ollama:confirm_rm:{m}")] for m in installed]
+    rows.append([("« Назад", "ollama:panel")])
+
+    text = "🗑 *Удалить модель Ollama*\nВыбери модель для удаления:"
+    markup = kb(rows)
+    if message_id:
+        tg_edit(message_id, text, markup)
+    else:
+        tg_send(text, markup)
+
+
+def send_ollama_confirm_rm(model: str, message_id: int | None = None) -> None:
+    """Подтверждение удаления модели."""
+    text = f"🗑 Удалить `{model}`?\nЭто освободит место на диске."
+    markup = kb([
+        [(f"✅ Удалить {model}", f"ollama:do_rm:{model}"), ("❌ Отмена", "ollama:rm_menu")],
+    ])
+    if message_id:
+        tg_edit(message_id, text, markup)
+    else:
+        tg_send(text, markup)
+
+
+def send_ollama_model_not_found(model: str, message_id: int | None = None) -> None:
+    """Модель не найдена — предлагаем управление."""
+    from agents import get_ollama_models
+    installed = get_ollama_models()
+    free      = _disk_free_str()
+
+    lines = [
+        f"❌ Модель `{model}` не установлена.",
+        f"Свободно: {free}",
+    ]
+    if installed:
+        lines += ["", "✅ Установлены: " + ", ".join(f"`{m}`" for m in installed)]
+
+    buttons = [
+        [("⬇️ Скачать модели",  "ollama:pull_menu"), ("📋 Установленные", "ollama:list")],
+        [("🌐 Каталог моделей", "ollama:library"),   ("🔧 Панель Ollama", "ollama:panel")],
+    ]
+    markup = kb(buttons)
+    if message_id:
+        tg_edit(message_id, "\n".join(lines), markup)
+    else:
+        tg_send("\n".join(lines), markup)
+
+
 def send_reset_menu(message_id: int | None = None) -> None:
     """Меню сброса сессий."""
     text = "🗑 Сброс сессии — выбери агента:"
     buttons = [
-        [("Claude",  "reset:claude"),  ("Gemini", "reset:gemini")],
-        [("Qwen",    "reset:qwen"),    ("GPT",    "reset:openrouter")],
-        [("🔴 Все",  "reset:all"),     ("« Назад", "cmd:agent_menu")],
+        [("Claude",  "reset:claude"),  ("Gemini",  "reset:gemini")],
+        [("Qwen",    "reset:qwen"),    ("GPT",     "reset:openrouter")],
+        [("🦙 Ollama", "reset:ollama"), ("🔴 Все", "reset:all")],
+        [("« Назад", "cmd:agent_menu")],
     ]
     markup = kb(buttons)
     if message_id:
@@ -432,9 +618,9 @@ def send_models_menu(message_id: int | None = None) -> None:
         return
     text = "🔧 Выбери агента для смены модели:"
     buttons = [
-        [("Claude",      "models:claude"),     ("Gemini",       "models:gemini")],
-        [("Qwen",        "models:qwen"),        ("🌐 OpenRouter", "models:openrouter")],
-        [("« Назад",     "cmd:agent_menu")],
+        [("Claude",       "models:claude"),     ("Gemini",        "models:gemini")],
+        [("Qwen",         "models:qwen"),        ("🌐 OpenRouter",  "models:openrouter")],
+        [("🦙 Ollama",    "models:ollama"),      ("« Назад",        "cmd:agent_menu")],
     ]
     markup = kb(buttons)
     if message_id:
@@ -445,16 +631,42 @@ def send_models_menu(message_id: int | None = None) -> None:
 
 def send_setup_menu(msg_id: int | None = None) -> None:
     """Панель проверки и установки агентов."""
+    import shutil as _shutil
+    import subprocess as _sub
     from agents import check_agents, get_openrouter_key  # ленивый импорт
 
     agents = check_agents()
     or_key = bool(get_openrouter_key())
 
+    # ── Node.js check ─────────────────────────────────────────
+    node_path = _shutil.which("node") or _shutil.which("nodejs")
+    if node_path:
+        try:
+            _ver = _sub.run([node_path, "--version"], capture_output=True, text=True, timeout=5)
+            node_ver = _ver.stdout.strip() or "?"
+        except Exception:
+            node_ver = "?"
+        node_ok = True
+    else:
+        node_ver = None
+        node_ok = False
+
     lines = ["🔧 Установка агентов", ""]
+
+    # Node.js row first (required for all CLI agents)
+    if node_ok:
+        lines.append(f"  ✅ Node.js {node_ver}")
+    else:
+        lines.append("  ❌ Node.js — не найден (требуется для Claude/Gemini/Qwen)")
+        lines.append("     curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo bash -")
+        lines.append("     sudo apt-get install -y nodejs")
+
+    lines.append("")
     rows: list = []
 
     icons = {"claude": "🔵", "gemini": "🟢", "qwen": "🟡"}
-    for ag, info in agents.items():
+    for ag in ("claude", "gemini", "qwen"):
+        info = agents.get(ag, {"ok": False, "path": None, "version": None})
         icon = icons[ag]
         if info["ok"]:
             lines.append(f"  ✅ {icon} {AGENT_NAMES[ag]} — {info['version']}")
@@ -467,6 +679,14 @@ def send_setup_menu(msg_id: int | None = None) -> None:
     lines.append("")
     lines.append(f"  {'✅' if or_key else '❌'} 🌐 OpenRouter — "
                  f"{'ключ задан' if or_key else 'нет ключа (/or /key sk-or-...)'}")
+
+    # ── Ollama — on-demand only ────────────────────────────────
+    ollama_info = agents.get("ollama", {"ok": False})
+    lines.append("")
+    if ollama_info["ok"]:
+        lines.append(f"  ✅ 🦙 Ollama — {ollama_info['version']}")
+    else:
+        lines.append("  ➖ 🦙 Ollama — не запущен (по запросу, не для VPS)")
 
     if not rows:
         lines.append("")
@@ -600,3 +820,22 @@ def send_or_model_search(query: str, page: int = 0, msg_id: int | None = None) -
         tg_edit(msg_id, text, markup)
     else:
         tg_send(text, markup)
+
+
+
+# ── НАСТРОЙКИ ПУТЕЙ ──────────────────────────────────────────
+def send_settings_panel(msg_id: int | None = None) -> None:
+    """Показывает текущие пути бота с кнопками управления."""
+    import export_manager
+    text = export_manager.settings_info()
+    rows = [
+        [("✏️ Изменить workspace", "settings:change_workdir")],
+        [("📦 Экспорт состояния",  "export:state"),
+         ("📁 + Проекты",          "export:metadata")],
+        [("💡 rsync команды",      "export:rsync")],
+        [("← Назад",               "cmd:menu")],
+    ]
+    if msg_id:
+        tg_edit(msg_id, text, kb(rows))
+    else:
+        tg_send(text, kb(rows))

@@ -42,6 +42,65 @@ import router
 OR_MODELS_TTL = 3600
 _or_id_map: dict[str, str] = {}
 
+# ── DYNAMIC MODEL DISCOVERY ───────────────────────────────────
+_CLI_MODELS_CACHE: dict[str, tuple[list[str], float]] = {}
+_CLI_MODELS_TTL = 300  # 5 min
+
+_NVM_BIN = "/home/stx/.nvm/versions/node/v22.20.0/lib/node_modules"
+_GEMINI_MODELS_JS = (
+    f"{_NVM_BIN}/@google/gemini-cli/node_modules"
+    "/@google/gemini-cli-core/dist/src/config/models.js"
+)
+_QWEN_CLI_JS = f"{_NVM_BIN}/@qwen-code/qwen-code/cli.js"
+
+
+def get_cli_models(agent: str) -> list[str]:
+    """Return available models for a CLI agent, with a 5-min cache.
+    Reads from the installed npm package source; falls back to KNOWN_MODELS."""
+    import re
+    from config import KNOWN_MODELS
+
+    now = time.time()
+    cached = _CLI_MODELS_CACHE.get(agent)
+    if cached and now - cached[1] < _CLI_MODELS_TTL:
+        return cached[0]
+
+    models: list[str] = []
+    try:
+        if agent == "gemini":
+            with open(_GEMINI_MODELS_JS) as f:
+                src = f.read()
+            # Extract VALID_GEMINI_MODELS set members + auto aliases
+            # Grab all export const X = 'value' lines that look like model IDs
+            models = re.findall(r"export const \w+ = '((?:gemini|auto-gemini)-[^']+)'", src)
+            # Filter out internal/embedding models, keep unique order
+            skip = {"gemini-embedding", "customtools"}
+            models = list(dict.fromkeys(
+                m for m in models if not any(s in m for s in skip)
+            ))
+
+        elif agent == "qwen":
+            with open(_QWEN_CLI_JS) as f:
+                src = f.read()
+            # Extract model IDs used by the Qwen CLI picker
+            models = list(dict.fromkeys(
+                re.findall(r'\b((?:coder|vision)-model)\b', src)
+            ))
+
+        elif agent == "claude":
+            # Claude Code bundles many historical model IDs in its binary.
+            # KNOWN_MODELS is the reliable source for current Claude models.
+            pass  # falls through to KNOWN_MODELS fallback below
+
+    except Exception as e:
+        log_warn(f"[models] discovery failed for {agent}: {e}")
+
+    if not models:
+        models = list(KNOWN_MODELS.get(agent, []))
+
+    _CLI_MODELS_CACHE[agent] = (models, now)
+    return models
+
 
 # ── ПАРСИНГ JSON ОТВЕТА (Claude/Gemini/Qwen формат) ─────────
 def _parse_cli_output(raw: str, session_file: str) -> str:
@@ -86,6 +145,43 @@ def _parse_cli_output(raw: str, session_file: str) -> str:
     return raw
 
 
+def _parse_stream_json_output(raw: str, session_file: str) -> str:
+    """Parse Claude --output-format stream-json (newline-delimited JSON events).
+
+    Looks for the 'result' event which contains the complete final text and
+    session_id.  Falls back to concatenating all content_block_delta texts.
+    """
+    if not raw:
+        return ""
+    result_text = ""
+    delta_text = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except Exception:
+            continue
+        t = ev.get("type", "")
+        # Save session from any event that carries it
+        sid = ev.get("session_id")
+        if sid:
+            _save_session(session_file, sid)
+        if t == "result":
+            if ev.get("is_error"):
+                err = (ev.get("error", {}).get("message")
+                       or ev.get("result") or "Ошибка CLI")
+                return f"⚠️ {err}"
+            result_text = ev.get("result", "")
+        elif t == "content_block_delta":
+            txt = ev.get("delta", {}).get("text", "")
+            if txt:
+                delta_text.append(txt)
+    # Prefer the complete 'result' field; fall back to assembled deltas
+    return result_text or "".join(delta_text) or raw
+
+
 # ── GEMINI FALLBACK ──────────────────────────────────────────
 def _is_gemini_capacity_error(text: str) -> bool:
     """Проверяет, является ли stderr-вывод ошибкой перегрузки/недоступности модели.
@@ -112,7 +208,8 @@ def _is_gemini_capacity_error(text: str) -> bool:
 
 def _gemini_fallback_retry(binary: str, session_file: str, ctx_file: str,
                             full_prompt: str, file_path: str | None,
-                            timeout: int, env: dict) -> str:
+                            timeout: int, env: dict,
+                            cwd: str | None = None) -> str:
     """
     При ошибке модели Gemini перебирает fallback-модели по порядку.
     Пропускает модели с ошибкой доступа/перегрузки.
@@ -137,28 +234,31 @@ def _gemini_fallback_retry(binary: str, session_file: str, ctx_file: str,
             cmd += ["--resume", sid]
         cmd += ["--prompt", full_prompt]
 
-        # Use a short timeout for fallback probes — we only need to detect
-        # whether the model is available, not wait for a full response.
-        # If the model IS available it will respond quickly (no internal retries).
-        fallback_timeout = min(45, timeout)
-        stdout, stderr, rc, timed_out = _run_subprocess(cmd, fallback_timeout, WORK_DIR, env)
+        # Gemini CLI retries 429 internally with exponential backoff —
+        # this can take 60-120s. Give enough time for that to complete.
+        fallback_timeout = min(180, timeout)
+        _cwd = cwd or WORK_DIR
+        stdout, stderr, rc, timed_out = _run_subprocess(cmd, fallback_timeout, _cwd, env)
 
-        if timed_out or rc < 0:
-            # Timed out or killed (e.g. SIGKILL from cancel button, rc=-9).
-            # Don't continue trying other models — user cancelled or something
-            # went badly wrong.
-            log_error(f"Gemini fallback {fallback} TIMEOUT or killed (rc={rc})")
+        if rc < 0:
+            # SIGKILL = user cancelled — stop immediately
+            log_error(f"Gemini fallback {fallback} killed (rc={rc})")
             break
+
+        if timed_out:
+            # This fallback timed out — try next model rather than giving up
+            log_warn(f"Gemini fallback {fallback} timeout={fallback_timeout}s — trying next")
+            continue
 
         # Проверяем только stderr при ненулевом rc — иначе текст ответа
         # (stdout) может содержать те же фразы и вызвать ложное срабатывание.
         if rc != 0 and _is_gemini_capacity_error(stderr):
-            log_warn(f"Gemini fallback {fallback} also failed: capacity/not-found")
+            log_warn(f"Gemini fallback {fallback} also 429/unavailable: {stderr.strip()[:120]}")
             continue
 
         reply = _parse_cli_output(stdout.strip(), session_file) or ""
         if not reply and rc != 0:
-            log_warn(f"Gemini fallback {fallback} empty reply, rc={rc}")
+            log_warn(f"Gemini fallback {fallback} empty reply rc={rc} stderr={stderr.strip()[:120]}")
             continue
 
         set_model("gemini", fallback)
@@ -166,10 +266,16 @@ def _gemini_fallback_retry(binary: str, session_file: str, ctx_file: str,
         log_info(f"Gemini fallback success: {fallback}, reply={len(reply)}ch")
         return reply or stderr.strip()[:500] or "⚠️ Пустой ответ"
 
-    return (f"❌ Gemini недоступен — все модели перегружены (квота исчерпана).\n"
-            f"Попробованы: {', '.join(tried)}\n\n"
-            f"Переключись на другой агент: /claude или /qwen\n"
-            f"Или подожди сброса квоты Google (обычно к полуночи по PST).")
+    return (
+        f"❌ Gemini: квота исчерпана на всех моделях (HTTP 429).\n"
+        f"Попробованы: {', '.join(tried)}\n\n"
+        f"Причина: лимит запросов Code Assist API (`cloudcode-pa.googleapis.com`).\n"
+        f"Квота привязана к Google-аккаунту, не к тарифу.\n\n"
+        f"Что делать:\n"
+        f"• Подожди 1-2 часа — квота сбрасывается по RPM/RPD\n"
+        f"• Используй /claude, /qwen или /openrouter\n"
+        f"• Для неограниченного доступа — API-ключ Gemini через OpenRouter"
+    )
 
 
 # ── SUBPROCESS HELPER ────────────────────────────────────────
@@ -201,26 +307,85 @@ def cancel_active_proc() -> None:
     _active_proc = None
 
 
-def _run_subprocess(cmd: list, timeout: int, cwd: str, env: dict
+def _run_subprocess(cmd: list, timeout: int, cwd: str, env: dict,
+                    stderr_watcher=None,
+                    stdout_cb=None,
                     ) -> tuple[str, str, int, bool]:
     """Запускает процесс; при таймауте убивает его и ждёт завершения.
-    Возвращает (stdout, stderr, returncode, timed_out)."""
+    Возвращает (stdout, stderr, returncode, timed_out).
+
+    stderr_watcher: optional callable(line: str) — fires on each stderr line
+                    (background thread, for early error detection).
+    stdout_cb:      optional callable(line: str) — fires on each stdout line
+                    (background thread, for streaming responses).
+                    When set, stdout is collected line-by-line instead of
+                    via proc.stdout.read().
+    """
     global _active_proc
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            stdin=subprocess.DEVNULL,
                             text=True, cwd=cwd, env=env, start_new_session=True)
     _active_proc = proc
-    try:
-        stdout, stderr = proc.communicate(timeout=timeout)
-        return stdout, stderr, proc.returncode, False
-    except subprocess.TimeoutExpired:
-        _kill_proc_tree(proc)
+
+    if stderr_watcher or stdout_cb:
+        stderr_lines: list[str] = []
+        stdout_lines: list[str] = []
+
+        def _read_stderr():
+            for line in proc.stderr:
+                stderr_lines.append(line)
+                if stderr_watcher:
+                    try:
+                        stderr_watcher(line)
+                    except Exception:
+                        pass
+
+        t_err = threading.Thread(target=_read_stderr, daemon=True)
+        t_err.start()
+
+        # Always read stdout in a thread — never block the main thread with
+        # proc.stdout.read() because that has no timeout and will deadlock
+        # when the process hangs (e.g. Gemini waiting on stdin/network).
+        def _read_stdout():
+            for line in proc.stdout:
+                stdout_lines.append(line)
+                if stdout_cb:
+                    try:
+                        stdout_cb(line)
+                    except Exception:
+                        pass
+        t_out = threading.Thread(target=_read_stdout, daemon=True)
+        t_out.start()
+
         try:
-            stdout, stderr = proc.communicate(timeout=2)
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                _kill_proc_tree(proc)
+                t_out.join(timeout=2)
+                t_err.join(timeout=2)
+                return "".join(stdout_lines), "".join(stderr_lines), -1, True
+            t_out.join(timeout=2)
+            t_err.join(timeout=2)
+            return "".join(stdout_lines), "".join(stderr_lines), proc.returncode, False
+        except Exception:
+            _kill_proc_tree(proc)
+            return "", "".join(stderr_lines), -1, True
+        finally:
+            _active_proc = None
+    else:
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+            return stdout, stderr, proc.returncode, False
         except subprocess.TimeoutExpired:
-            stdout, stderr = "", ""
-        return stdout, stderr, -1, True
-    finally:
-        _active_proc = None
+            _kill_proc_tree(proc)
+            try:
+                stdout, stderr = proc.communicate(timeout=2)
+            except subprocess.TimeoutExpired:
+                stdout, stderr = "", ""
+            return stdout, stderr, -1, True
+        finally:
+            _active_proc = None
 
 
 _NON_RETRYABLE_MARKERS = (
@@ -259,7 +424,9 @@ def _run_cli(binary: str, session_file: str, ctx_file: str,
              agent_name: str, prompt: str,
              file_path: str | None = None,
              extra_flags: list | None = None,
-             model_override: str | None = None) -> str:
+             model_override: str | None = None,
+             stream_cb=None,
+             cwd: str | None = None) -> str:
     """
     Запускает CLI-агент (claude/gemini/qwen) с промптом, сессией и файлом.
     Для Claude добавляет --dangerously-skip-permissions.
@@ -301,8 +468,12 @@ def _run_cli(binary: str, session_file: str, ctx_file: str,
     cmd = [binary]
     if is_claude:
         cmd += ["--print", "--dangerously-skip-permissions"]
-    cmd += ["--output-format", "json"]
-    if not is_claude:
+        # stream-json requires --verbose when used with --print
+        _fmt = "stream-json" if stream_cb else "json"
+        cmd += ["--output-format", _fmt]
+        if stream_cb:
+            cmd += ["--verbose"]
+    else:
         cmd += ["--yolo"]
     if effective_model:
         cmd += ["--model", effective_model]
@@ -320,6 +491,15 @@ def _run_cli(binary: str, session_file: str, ctx_file: str,
     for var in ("CLAUDECODE", "GEMINICODE", "QWENCODE"):
         env.pop(var, None)
 
+    # Gemini connects directly to Google APIs — proxy (set by start.sh for
+    # Telegram polling) breaks the connection and causes 12-second timeouts.
+    if agent_key == "gemini":
+        for proxy_var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+                          "ALL_PROXY", "all_proxy"):
+            env.pop(proxy_var, None)
+
+    _cwd = cwd if cwd and os.path.isdir(cwd) else WORK_DIR
+
     t_start = time.time()
     timeout_secs = _AGENT_TIMEOUT.get(agent_key, 300)
     log_info(f"→ {agent_name} [{effective_model}] prompt={len(full_prompt)}ch timeout={timeout_secs}s"
@@ -327,12 +507,54 @@ def _run_cli(binary: str, session_file: str, ctx_file: str,
     log_debug(f"  prompt preview: {full_prompt[:200]!r}")
 
     try:
-        stdout, stderr, rc, timed_out = _run_subprocess(cmd, timeout_secs, WORK_DIR, env)
+        # For Claude streaming: parse content_block_delta events line-by-line.
+        _stdout_line_cb = None
+        if is_claude and stream_cb:
+            def _stdout_line_cb(line: str) -> None:
+                line = line.strip()
+                if not line:
+                    return
+                try:
+                    ev = json.loads(line)
+                    if ev.get("type") == "content_block_delta":
+                        text = ev.get("delta", {}).get("text", "")
+                        if text:
+                            stream_cb(text)
+                except (json.JSONDecodeError, KeyError):
+                    pass
+
+        # For Gemini: watch stderr live so we can notify the user immediately
+        # if Google returns 429 — the CLI will keep retrying internally for
+        # minutes, but the user can switch agents right away.
+        if agent_key == "gemini":
+            _quota_notified = threading.Event()
+
+            def _gemini_stderr_watcher(line: str) -> None:
+                if _quota_notified.is_set():
+                    return
+                if "429" in line or "exhausted" in line.lower() or "rateLimitExceeded" in line:
+                    _quota_notified.set()
+                    from ui import tg_send as _tg
+                    _tg(
+                        "⚠️ Gemini: Google вернул 429 (квота).\n"
+                        "CLI автоматически повторяет запрос — подожди, или переключись прямо сейчас:\n"
+                        "/claude  /qwen  /openrouter"
+                    )
+                    log_warn("Gemini 429 detected early via stderr watcher")
+
+            stdout, stderr, rc, timed_out = _run_subprocess(
+                cmd, timeout_secs, _cwd, env, stderr_watcher=_gemini_stderr_watcher
+            )
+        else:
+            stdout, stderr, rc, timed_out = _run_subprocess(
+                cmd, timeout_secs, _cwd, env,
+                stdout_cb=_stdout_line_cb,
+            )
 
         if _is_transient_error(stdout, stderr, rc, timed_out):
             log_warn(f"{agent_name}: transient error (rc={rc}), retrying in 2s…")
             time.sleep(2)
-            stdout, stderr, rc, timed_out = _run_subprocess(cmd, timeout_secs, WORK_DIR, env)
+            stdout, stderr, rc, timed_out = _run_subprocess(cmd, timeout_secs, _cwd, env)
 
         elapsed = time.time() - t_start
 
@@ -350,6 +572,10 @@ def _run_cli(binary: str, session_file: str, ctx_file: str,
         import rate_tracker
         if is_claude and rc == 0:
             rate_tracker.log_request(agent_key) # Локальный счетчик (эвристика)
+        if agent_key == "gemini":
+            rate_tracker.log_request("gemini")  # Трекинг Gemini RPD
+        if agent_key == "qwen":
+            rate_tracker.log_request("qwen")    # Трекинг Qwen RPD
 
             # Пассивный парсинг системных сообщений из stdout/stderr
             combined_output = stdout + stderr
@@ -381,10 +607,14 @@ def _run_cli(binary: str, session_file: str, ctx_file: str,
         # rc < 0 означает SIGKILL (отмена пользователем) — fallback не нужен.
         if agent_key == "gemini" and rc > 0 and _is_gemini_capacity_error(stderr):
             return _gemini_fallback_retry(
-                binary, session_file, ctx_file, full_prompt, file_path, timeout_secs, env
+                binary, session_file, ctx_file, full_prompt, file_path, timeout_secs, env,
+                cwd=_cwd,
             )
 
-        reply = _parse_cli_output(raw, session_file) or stderr.strip()[:1000] or "⚠️ Пустой ответ"
+        if is_claude and stream_cb:
+            reply = _parse_stream_json_output(raw, session_file) or stderr.strip()[:1000] or "⚠️ Пустой ответ"
+        else:
+            reply = _parse_cli_output(raw, session_file) or stderr.strip()[:1000] or "⚠️ Пустой ответ"
 
         # Обратный перевод для Claude: EN -> RU
         if is_claude and reply and not reply.startswith("⚠️"):
@@ -575,8 +805,71 @@ def run_startup_check() -> None:
         f.write(time.strftime("%Y-%m-%d %H:%M:%S"))
 
 
+# ── GEMINI CWD STRATEGY ──────────────────────────────────────
+# Gemini CLI scans all files in its working directory on each new session.
+# Running in a large workspace (thousands of files) = 10-20 hidden API
+# requests per prompt, burning through the 1500 RPD quota fast.
+#
+# Strategy:
+#   lite mode ON  → CWD = STATE_DIR  (bot configs only, no source code)
+#   active project → CWD = project dir (just that one project, not the whole workspace)
+#   fallback       → CWD = WORK_DIR  (original behaviour)
+
+_gemini_lite_mode: bool = False   # toggled via /gemini_lite or Gemini panel button
+
+
+def get_gemini_lite() -> bool:
+    return _gemini_lite_mode
+
+
+def set_gemini_lite(val: bool) -> None:
+    global _gemini_lite_mode
+    _gemini_lite_mode = val
+
+
+def _get_agent_workspace(agent_key: str) -> str:
+    """Return the isolated workspace dir for the given agent.
+
+    Each agent runs in its own empty folder — it never sees the bot's source
+    code or other project files, so it won't waste API quota scanning them.
+    If a Team Mode project is active, use the project's own workspace subdir
+    (inside PROJECTS_WORKSPACE) so the agent sees only that project's files.
+    Sessions and memory are stored in STATE_DIR (unaffected by CWD).
+    """
+    from config import CLAUDE_WORKSPACE, GEMINI_WORKSPACE, QWEN_WORKSPACE, PROJECTS_WORKSPACE
+
+    # Active Team Mode project → actual project directory (agent needs the code)
+    try:
+        import team_mode as _tm
+        proj = _tm._cur_project()
+        if proj:
+            proj_dir = _tm._project_dir(proj)
+            if os.path.isdir(proj_dir):
+                return proj_dir   # scan only this project, not the whole workspace
+    except Exception:
+        pass
+
+    # No project → agent's own sandbox (empty, no source files to scan)
+    ws_map = {"claude": CLAUDE_WORKSPACE, "gemini": GEMINI_WORKSPACE, "qwen": QWEN_WORKSPACE}
+    ws = ws_map.get(agent_key)
+    if ws:
+        os.makedirs(ws, exist_ok=True)
+        return ws
+
+    from config import STATE_DIR
+    return STATE_DIR
+
+
+def _get_gemini_cwd() -> str:
+    """Backward-compat wrapper — kept for /gemini_lite toggle in tg_agent.py."""
+    from config import STATE_DIR, GEMINI_WORKSPACE
+    if _gemini_lite_mode:
+        return GEMINI_WORKSPACE  # lite: isolated sandbox, no project files
+    return _get_agent_workspace("gemini")
+
+
 # ── АГЕНТЫ ───────────────────────────────────────────────────
-def ask_claude(prompt: str, file_path: str | None = None) -> str:
+def ask_claude(prompt: str, file_path: str | None = None, stream_cb=None) -> str:
     bin_path = _get_effective_bin("claude")
     if not os.path.isfile(bin_path):
         return "❌ Claude CLI не установлен. Используй /setup для установки."
@@ -587,23 +880,59 @@ def ask_claude(prompt: str, file_path: str | None = None) -> str:
     effective_model = router.classify(prompt, file_path, current_model)
     return _run_cli(bin_path, CLAUDE_SESSION, CLAUDE_CTX_FILE,
                     "Claude", prompt, file_path,
-                    model_override=effective_model)
+                    model_override=effective_model,
+                    stream_cb=stream_cb,
+                    cwd=_get_agent_workspace("claude"))
 
 
-def ask_gemini(prompt: str, file_path: str | None = None) -> str:
+def ask_gemini(prompt: str, file_path: str | None = None, stream_cb=None) -> str:
     bin_path = _get_effective_bin("gemini")
     if not os.path.isfile(bin_path):
         return "❌ Gemini CLI не установлен. Используй /setup для установки."
+
+    # ── Pre-request quota check ───────────────────────────────
+    try:
+        import rate_tracker as _rt
+        _count = _rt.get_gemini_prompts_today()
+        _rpm   = _rt.get_gemini_rpm()
+        _hrs   = _rt._gemini_hours_until_reset()
+
+        if _count >= _rt._GEMINI_PROMPT_CRIT:
+            return (
+                f"🔴 Gemini: исчерпан дневной лимит (~{_rt._GEMINI_PROMPT_CRIT} промптов, "
+                f"~{_rt._GEMINI_RPD} API-запросов).\n"
+                f"Сброс через {_hrs} (в 10:00 МСК).\n\n"
+                "Переключись: /claude, /qwen или /openrouter"
+            )
+        elif _count >= _rt._GEMINI_PROMPT_WARN:
+            # Warn but proceed — send through a tg message via lazy import
+            try:
+                from ui import tg_send
+                tg_send(
+                    f"⚠️ Gemini: {_count} промптов сегодня — остаток ~"
+                    f"{_rt._GEMINI_PROMPT_CRIT - _count}. Сброс через {_hrs}."
+                )
+            except Exception:
+                pass
+
+        if _rpm >= _rt._GEMINI_RPM_LIMIT:
+            time.sleep(3)  # brief throttle to avoid RPM burst
+    except Exception:
+        pass
+    # ─────────────────────────────────────────────────────────
+
     return _run_cli(bin_path, GEMINI_SESSION, GEMINI_CTX_FILE,
-                    "Gemini", prompt, file_path)
+                    "Gemini", prompt, file_path,
+                    cwd=_get_gemini_cwd())
 
 
-def ask_qwen(prompt: str, file_path: str | None = None) -> str:
+def ask_qwen(prompt: str, file_path: str | None = None, stream_cb=None) -> str:
     bin_path = _get_effective_bin("qwen")
     if not os.path.isfile(bin_path):
         return "❌ Qwen CLI не установлен. Используй /setup для установки."
     return _run_cli(bin_path, QWEN_SESSION, QWEN_CTX_FILE,
-                    "Qwen", prompt, file_path)
+                    "Qwen", prompt, file_path,
+                    cwd=_get_agent_workspace("qwen"))
 
 
 # ── СЖАТИЕ КОНТЕКСТА ─────────────────────────────────────────
@@ -649,6 +978,37 @@ def compress_openrouter() -> str:
         return f"❌ compress_openrouter: {e}"
 
 
+# ── STREAMING HELPER (OpenAI-compatible SSE) ─────────────────
+def _parse_sse_stream(response, stream_cb) -> str:
+    """Consume an OpenAI-compatible SSE stream.
+
+    Calls stream_cb(chunk) for every non-empty text delta.
+    Returns the full accumulated text, or "❌ ..." on API-level errors.
+    """
+    parts: list[str] = []
+    for raw_line in response.iter_lines():
+        if not raw_line:
+            continue
+        line = raw_line.decode() if isinstance(raw_line, bytes) else raw_line
+        if line.startswith("data: "):
+            line = line[6:]
+        if line.strip() == "[DONE]":
+            break
+        try:
+            data = json.loads(line)
+            if "error" in data:
+                err = data["error"]
+                return f"❌ {err.get('message', str(err)) if isinstance(err, dict) else err}"
+            delta = (data.get("choices") or [{}])[0].get("delta", {}).get("content") or ""
+            if delta:
+                parts.append(delta)
+                if stream_cb:
+                    stream_cb(delta)
+        except (json.JSONDecodeError, KeyError, IndexError):
+            pass
+    return "".join(parts)
+
+
 # ── OPENROUTER API ────────────────────────────────────────────
 def get_openrouter_key() -> str:
     """Читает API ключ из файла, затем из CONFIG."""
@@ -667,7 +1027,7 @@ def set_openrouter_key(key: str) -> None:
     log_info("OpenRouter API key updated")
 
 
-def ask_openrouter(prompt: str, file_path: str | None = None) -> str:
+def ask_openrouter(prompt: str, file_path: str | None = None, stream_cb=None) -> str:
     key = get_openrouter_key()
     if not key:
         return (
@@ -680,8 +1040,9 @@ def ask_openrouter(prompt: str, file_path: str | None = None) -> str:
     messages = shared_ctx_for_api()
     if not messages or messages[-1]["content"] != prompt:
         messages.append({"role": "user", "content": prompt})
+    use_stream = stream_cb is not None
     try:
-        log_info(f"→ OpenRouter [{model}] prompt={len(prompt)}ch")
+        log_info(f"→ OpenRouter [{model}] prompt={len(prompt)}ch stream={use_stream}")
         t = time.time()
         r = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
@@ -690,23 +1051,30 @@ def ask_openrouter(prompt: str, file_path: str | None = None) -> str:
                 "HTTP-Referer": "https://github.com/tg-agent",
                 "X-Title": "TG-Agent",
             },
-            json={"model": model, "messages": messages},
+            json={"model": model, "messages": messages, "stream": use_stream},
             timeout=120,
+            stream=use_stream,
         )
-        data = r.json()
         elapsed = time.time() - t
-        # Capture rate-limit headers (non-blocking, best-effort)
-        try:
-            import rate_tracker
-            rate_tracker.update_from_headers("openrouter", r.headers)
-        except Exception:
-            pass
-        if "error" in data:
-            err = data["error"]
-            msg = err.get("message", str(err))
-            log_warn(f"OpenRouter error: {msg}")
-            return f"❌ OpenRouter: {msg}"
-        reply = data["choices"][0]["message"]["content"]
+        if use_stream:
+            reply = _parse_sse_stream(r, stream_cb)
+            if reply.startswith("❌"):
+                log_warn(f"OpenRouter stream error: {reply}")
+                return f"OpenRouter: {reply}"
+        else:
+            data = r.json()
+            # Capture rate-limit headers (non-blocking, best-effort)
+            try:
+                import rate_tracker
+                rate_tracker.update_from_headers("openrouter", r.headers)
+            except Exception:
+                pass
+            if "error" in data:
+                err = data["error"]
+                msg = err.get("message", str(err))
+                log_warn(f"OpenRouter error: {msg}")
+                return f"❌ OpenRouter: {msg}"
+            reply = data["choices"][0]["message"]["content"]
         log_info(f"← OpenRouter {elapsed:.1f}s reply={len(reply)}ch")
         return reply
     except Exception as e:
@@ -726,48 +1094,183 @@ def get_ollama_models() -> list[str]:
         return []
 
 
-def ask_ollama(prompt: str, file_path: str | None = None) -> str:
+_OLLAMA_MODEL_NOT_FOUND = "__OLLAMA_MODEL_NOT_FOUND__"
+_ollama_active_pulls: dict[str, bool] = {}  # model -> True while pulling
+
+
+def ollama_pull_model(model: str, send_fn, edit_fn) -> bool:
+    """Pull an Ollama model in background. Returns False if already pulling.
+
+    send_fn(text) -> message_id  — send a new TG message, return its id
+    edit_fn(msg_id, text)        — edit existing TG message
+    """
+    import re as _re
+    if _ollama_active_pulls.get(model):
+        return False
+    _ollama_active_pulls[model] = True
+
+    def _pull():
+        msg_id = send_fn(
+            f"⏳ Начинаю загрузку `{model}`...\n"
+            "Можно пока использовать другого агента (/gemini, /claude)."
+        )
+        try:
+            # Build env: inherit everything + force SOCKS5 proxy for ollama
+            pull_env = {**os.environ, "NO_COLOR": "1", "TERM": "dumb"}
+            # Detect proxy port 2080 (nekobox) and set SOCKS5 for ollama
+            import socket as _sock
+            try:
+                s = _sock.create_connection(("127.0.0.1", 2080), timeout=0.5)
+                s.close()
+                proxy_url = "socks5://127.0.0.1:2080"
+                pull_env["HTTPS_PROXY"] = proxy_url
+                pull_env["HTTP_PROXY"]  = proxy_url
+                pull_env["ALL_PROXY"]   = proxy_url
+                log_info(f"[ollama pull] using proxy {proxy_url}")
+            except OSError:
+                pull_env.pop("HTTPS_PROXY", None)
+                pull_env.pop("HTTP_PROXY",  None)
+                pull_env.pop("ALL_PROXY",   None)
+                log_info("[ollama pull] no proxy detected, direct connection")
+
+            # Discard stdout/stderr — progress tracked via `ollama ps` polling
+            proc = subprocess.Popen(
+                ["ollama", "pull", model],
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                env=pull_env,
+            )
+
+            last_status = ""
+            while proc.poll() is None:
+                time.sleep(4)
+                try:
+                    ps = subprocess.run(
+                        ["ollama", "ps"],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    # Find line with our model, e.g.: "qwen3:1.7b  ...  34% 456 MB/1.1 GB"
+                    for ps_line in ps.stdout.splitlines():
+                        m = _re.search(
+                            r'(\d+)%\s+([\d.]+\s*\w+)\s*/\s*([\d.]+\s*\w+)',
+                            ps_line,
+                        )
+                        if m and model.split(":")[0] in ps_line:
+                            status = f"⏳ `{model}`: {m.group(1)}% ({m.group(2)} / {m.group(3)})"
+                            if status != last_status:
+                                last_status = status
+                                if msg_id:
+                                    edit_fn(msg_id, status)
+                            break
+                except Exception:
+                    pass
+
+            stderr_out = proc.stderr.read().decode("utf-8", errors="replace").strip()
+            rc = proc.returncode
+
+            # Verify via ollama list rather than trusting return code alone
+            installed_after = get_ollama_models()
+            model_base = model.split(":")[0]
+            success = rc == 0 or any(model_base in m for m in installed_after)
+
+            if success:
+                _CLI_MODELS_CACHE.pop("ollama", None)
+                done_text = (
+                    f"✅ Модель `{model}` установлена!\n"
+                    f"Доступна в /menu → ⚙️ Ollama → 📋 Установленные"
+                )
+            else:
+                details = stderr_out or f"exit code {rc}"
+                log_warn(f"[ollama pull] FAILED rc={rc}: {details}")
+                done_text = (
+                    f"❌ Не удалось установить `{model}`\n\n"
+                    f"`{details[:400]}`\n\n"
+                    f"Проверь имя на [ollama.com/library](https://ollama.com/library)"
+                )
+            edit_fn(msg_id, done_text) if msg_id else send_fn(done_text)
+        except FileNotFoundError:
+            txt = "❌ `ollama` не найден. Установи: https://ollama.com/download"
+            edit_fn(msg_id, txt) if msg_id else send_fn(txt)
+        except Exception as e:
+            log_error("ollama_pull", e)
+            txt = f"❌ Ошибка загрузки `{model}`: {e}"
+            edit_fn(msg_id, txt) if msg_id else send_fn(txt)
+        finally:
+            _ollama_active_pulls.pop(model, None)
+
+    threading.Thread(target=_pull, daemon=True, name=f"ollama-pull-{model}").start()
+    return True
+
+
+def ask_ollama(prompt: str, file_path: str | None = None, stream_cb=None) -> str:
     """Call local Ollama via its OpenAI-compatible endpoint."""
     model = get_model("ollama") or OLLAMA_DEFAULT_MODEL
+    if not model:
+        available = get_ollama_models()
+        if available:
+            model = available[0]
+            set_model("ollama", model)
+        else:
+            return _OLLAMA_MODEL_NOT_FOUND
 
-    # Build message list: shared context + user prompt
+    # Build message list from shared conversation context (all agents).
+    # This gives Ollama awareness of the full conversation history.
     messages = shared_ctx_for_api()
-    if not messages or messages[-1]["content"] != prompt:
+    if not messages or messages[-1].get("content") != prompt:
         messages.append({"role": "user", "content": prompt})
 
-    # Inject global memory as system message if present
-    mem = global_ctx_for_prompt()
-    if mem:
-        messages.insert(0, {"role": "system", "content": mem})
+    # Prepend identity system prompt so Ollama doesn't adopt a previous
+    # agent's persona (e.g. Claude saying "I am Claude Code" in prior turns).
+    # Do NOT inject global_ctx_for_prompt() — that's Claude-specific memory.
+    identity = (
+        f"You are {model}, a local AI assistant running via Ollama. "
+        "This conversation may include responses from other AI systems "
+        "(Claude, Gemini, Qwen) — those are prior turns, not your own words. "
+        "Answer as yourself."
+    )
+    messages.insert(0, {"role": "system", "content": identity})
 
+    use_stream = stream_cb is not None
     try:
-        log_info(f"→ Ollama [{model}] prompt={len(prompt)}ch")
+        log_info(f"→ Ollama [{model}] prompt={len(prompt)}ch stream={use_stream}")
         t = time.time()
         # proxies=None bypasses HTTP_PROXY — Ollama is local, no proxy needed
         r = requests.post(
             f"{OLLAMA_BASE_URL}/v1/chat/completions",
-            json={"model": model, "messages": messages, "stream": False},
+            json={"model": model, "messages": messages, "stream": use_stream},
             timeout=_AGENT_TIMEOUT.get("ollama", 120),
             proxies={"http": None, "https": None},
+            stream=use_stream,
         )
-        data = r.json()
         elapsed = time.time() - t
-        if "error" in data:
-            return f"❌ Ollama: {data['error']}"
-        reply = data["choices"][0]["message"]["content"]
+        if use_stream:
+            reply = _parse_sse_stream(r, stream_cb)
+            if reply.startswith("❌"):
+                if "not found" in reply.lower():
+                    return _OLLAMA_MODEL_NOT_FOUND
+                return f"❌ Ollama: {reply[2:].strip()}"
+        else:
+            data = r.json()
+            if "error" in data:
+                err_msg = data["error"]
+                if isinstance(err_msg, dict):
+                    err_msg = err_msg.get("message", str(data["error"]))
+                if "not found" in err_msg.lower():
+                    return _OLLAMA_MODEL_NOT_FOUND
+                return f"❌ Ollama: {err_msg}"
+            reply = data["choices"][0]["message"]["content"]
         log_info(f"← Ollama {elapsed:.1f}s reply={len(reply)}ch")
         total = _add_ctx(OLLAMA_CTX_FILE, len(prompt) + len(reply))
         ctx_warn, ctx_archive = CTX_LIMITS.get("ollama", (60_000, 200_000))
         if total >= ctx_archive:
             _reset_session(OLLAMA_SESSION, OLLAMA_CTX_FILE)
             from ui import tg_send
-            tg_send(f"🗄 Ollama: контекст архивирован. Новая сессия.")
+            tg_send("🗄 Ollama: контекст архивирован. Новая сессия.")
         elif total >= ctx_warn:
             from ui import tg_send
             tg_send(f"⚠️ Ollama: контекст {total // 1000}k/{ctx_archive // 1000}k симв.")
         return reply
     except requests.exceptions.ConnectionError:
-        return "❌ Ollama недоступна. Убедитесь что запущен: ollama serve"
+        return "❌ Ollama недоступна. Убедитесь что запущен: `ollama serve`"
     except Exception as e:
         log_error("Ollama exception", e)
         return f"❌ Ollama ошибка: {e}"
@@ -854,22 +1357,22 @@ def _or_model_label(m: dict, current: str) -> str:
 
 # ── Async wrappers (asyncio.to_thread, no new OS threads) ────────────────────
 
-async def async_ask_claude(prompt: str, file_path: str | None = None) -> str:
+async def async_ask_claude(prompt: str, file_path: str | None = None, stream_cb=None) -> str:
     """Async wrapper — runs ask_claude in the default thread pool."""
-    return await asyncio.to_thread(ask_claude, prompt, file_path)
+    return await asyncio.to_thread(ask_claude, prompt, file_path, stream_cb)
 
 
-async def async_ask_gemini(prompt: str, file_path: str | None = None) -> str:
-    return await asyncio.to_thread(ask_gemini, prompt, file_path)
+async def async_ask_gemini(prompt: str, file_path: str | None = None, stream_cb=None) -> str:
+    return await asyncio.to_thread(ask_gemini, prompt, file_path, stream_cb)
 
 
-async def async_ask_qwen(prompt: str, file_path: str | None = None) -> str:
-    return await asyncio.to_thread(ask_qwen, prompt, file_path)
+async def async_ask_qwen(prompt: str, file_path: str | None = None, stream_cb=None) -> str:
+    return await asyncio.to_thread(ask_qwen, prompt, file_path, stream_cb)
 
 
-async def async_ask_openrouter(prompt: str, file_path: str | None = None) -> str:
-    return await asyncio.to_thread(ask_openrouter, prompt, file_path)
+async def async_ask_openrouter(prompt: str, file_path: str | None = None, stream_cb=None) -> str:
+    return await asyncio.to_thread(ask_openrouter, prompt, file_path, stream_cb)
 
 
-async def async_ask_ollama(prompt: str, file_path: str | None = None) -> str:
-    return await asyncio.to_thread(ask_ollama, prompt, file_path)
+async def async_ask_ollama(prompt: str, file_path: str | None = None, stream_cb=None) -> str:
+    return await asyncio.to_thread(ask_ollama, prompt, file_path, stream_cb)

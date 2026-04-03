@@ -1,18 +1,52 @@
+# Python
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyc
-*.pyd
 *.egg-info/
 dist/
 build/
+
+# Secrets & tokens — NEVER commit these
 .env
-.venv
-venv/
-*.log
-*.tmp
-*.bak
-backup/
+token.txt
+*_key.txt
+*_rate_until.txt
+openrouter_key.txt
+openrouter_models.json
+
+# State files (runtime, per-user)
 *.db
 *.db-wal
 *.db-shm
+*.log
+*.tmp
+*.bak
+*_session.txt
+*_ctx_chars.txt
+*_model.txt
+*_bin_path.txt
+shared_context.json
+global_memory.json
+memory.md
+discuss_agents.json
+discuss_await.txt
+setup_done.txt
+all_agents.txt
+work_dir.txt
+git_commit_await.txt
+
+# Directories
+.worktrees/
+venv/
+.venv/
+backup*/
+archive/
+downloads/
+workspaces/
+state_backup*/
+
+# IDE
+.idea/
+.vscode/
+*.swp

@@ -1,11 +1,36 @@
 #!/usr/bin/env python3
 """
-rate_tracker.py — 100% Safe Rate Limit Tracker for Claude.
+rate_tracker.py — Rate Limit Tracker for Claude, Gemini and Qwen.
 
-Два источника данных:
-1. Пассивный парсинг CLI (Source of Truth): "10 messages remaining until 3:00 PM"
-2. Локальная эвристика (Fallback): Подсчет запросов в БД за 5-часовое окно (лимит ~45).
+Claude:
+  1. Пассивный парсинг CLI (Source of Truth): "10 messages remaining until 3:00 PM"
+  2. Локальная эвристика (Fallback): Подсчет запросов в БД за 5-часовое окно (лимит ~45).
+
+Gemini:
+  Квота Code Assist API: 1500 RPD (сброс в 10:00 МСК / 07:00 UTC).
+  Каждый «промпт» порождает ~10-20 внутренних API-запросов (сканирование файлов).
+  Реально: ~70-100 «тяжёлых» промптов в день.
+  RPM: до 20 в режиме CLI.
+
+Qwen:
+  1000 RPD (сброс в 03:00 МСК / 00:00 UTC).
+  Практически без ограничений по RPM при ручном использовании.
 """
+
+# ── Gemini квота ──────────────────────────────────────────────
+_GEMINI_RPD         = 1500   # суточный лимит запросов Code Assist API
+_GEMINI_AVG_MUL     = 15     # среднее кол-во API-вызовов на 1 промпт
+_GEMINI_PROMPT_WARN = 80     # предупреждение начиная с этого кол-ва промптов
+_GEMINI_PROMPT_CRIT = 95     # критический уровень (больше не рекомендуется)
+_GEMINI_RPM_LIMIT   = 18     # RPM порог: при приближении — предупреждение
+_MSK_OFFSET         = 3 * 3600   # UTC+3
+_GEMINI_RESET_HOUR  = 10         # 10:00 МСК
+
+# ── Qwen квота ────────────────────────────────────────────────
+_QWEN_RPD           = 1000   # суточный лимит
+_QWEN_PROMPT_WARN   = 800
+_QWEN_PROMPT_CRIT   = 950
+_QWEN_RESET_HOUR    = 3      # 03:00 МСК (00:00 UTC)
 
 import json
 import time
@@ -159,6 +184,8 @@ def get_all_status() -> str:
             icon = "🟢" if pct >= 40 else ("🟡" if pct >= 10 else "🔴")
             lines.append(f"  • {icon} {dim.upper()}: {pct}% ({v['remaining']}/{v['limit']})")
 
+    lines.append(get_gemini_status())
+    lines.append(get_qwen_status())
     lines.append("\n/limit claude 85 5h — ввести вручную")
     lines.append("/limit reset claude — сбросить")
     return "\n".join(lines)
@@ -259,4 +286,158 @@ def get_display(agent: str) -> str:
             icon = "🔴" if pct < 10 else ("🟡" if pct < 40 else "🟢")
             return f"{icon} ~{pct}%"
 
+    # 5. Gemini RPD tracking
+    if agent == "gemini":
+        count = get_gemini_prompts_today()
+        if count > 0:
+            icon = "🔴" if count >= _GEMINI_PROMPT_CRIT else ("🟡" if count >= _GEMINI_PROMPT_WARN else "🟢")
+            hrs = _gemini_hours_until_reset()
+            return f"{icon} {count}💬 {hrs}ч↺"
+
+    # 6. Qwen RPD tracking
+    if agent == "qwen":
+        count = get_qwen_prompts_today()
+        if count > 0:
+            icon = "🔴" if count >= _QWEN_PROMPT_CRIT else ("🟡" if count >= _QWEN_PROMPT_WARN else "🟢")
+            hrs = _qwen_hours_until_reset()
+            return f"{icon} {count}💬 {hrs}ч↺"
+
     return ""
+
+
+# ── GEMINI RPD/RPM TRACKING ───────────────────────────────────
+
+def _gemini_day_start() -> float:
+    """Unix timestamp of the last 10:00 MSK reset."""
+    now_utc = time.time()
+    now_msk_secs = now_utc + _MSK_OFFSET
+    # Seconds since midnight UTC (used to find local MSK midnight)
+    msk_midnight_utc = now_utc - (now_msk_secs % 86400)
+    reset_utc = msk_midnight_utc + _GEMINI_RESET_HOUR * 3600
+    if now_utc < reset_utc:
+        # Still before 10:00 MSK today — yesterday's reset is the current window
+        reset_utc -= 86400
+    return reset_utc
+
+
+def _gemini_hours_until_reset() -> str:
+    """Returns hours remaining until next 10:00 MSK reset, e.g. '3.5'."""
+    next_reset = _gemini_day_start() + 86400
+    secs = next_reset - time.time()
+    if secs <= 0:
+        return "0"
+    h = secs / 3600
+    return f"{h:.0f}" if h >= 1 else f"{secs/60:.0f}м"
+
+
+def get_gemini_prompts_today() -> int:
+    """Count Gemini prompts sent since the last 10:00 MSK reset."""
+    try:
+        from config import DB_PATH
+        from db_manager import Database
+        db = Database(DB_PATH)
+        day_start = _gemini_day_start()
+        dt = datetime.fromtimestamp(day_start).strftime('%Y-%m-%d %H:%M:%S')
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(*) FROM usage_log WHERE agent = 'gemini' AND timestamp > ?",
+                (dt,)
+            )
+            return cursor.fetchone()[0]
+    except Exception:
+        return 0
+
+
+def get_gemini_rpm() -> int:
+    """Count Gemini prompts in the last 60 seconds."""
+    try:
+        from config import DB_PATH
+        from db_manager import Database
+        db = Database(DB_PATH)
+        dt = datetime.fromtimestamp(time.time() - 60).strftime('%Y-%m-%d %H:%M:%S')
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(*) FROM usage_log WHERE agent = 'gemini' AND timestamp > ?",
+                (dt,)
+            )
+            return cursor.fetchone()[0]
+    except Exception:
+        return 0
+
+
+def get_gemini_status() -> str:
+    """Full Gemini quota status for /limit command."""
+    count = get_gemini_prompts_today()
+    rpm = get_gemini_rpm()
+    est_api = count * _GEMINI_AVG_MUL
+    remaining_prompts = max(0, _GEMINI_PROMPT_CRIT - count)
+    hrs = _gemini_hours_until_reset()
+
+    icon = "🔴" if count >= _GEMINI_PROMPT_CRIT else ("🟡" if count >= _GEMINI_PROMPT_WARN else "🟢")
+    lines = [
+        f"\n🟢 *Gemini Code Assist — дневной лимит*",
+        f"  {icon} Промптов сегодня: *{count}* / ~{_GEMINI_PROMPT_CRIT}",
+        f"  Примерно API-запросов: ~{est_api} / {_GEMINI_RPD}",
+        f"  RPM сейчас: {rpm} / {_GEMINI_RPM_LIMIT}",
+        f"  Осталось промптов: ~{remaining_prompts}",
+        f"  Сброс через: {hrs}",
+        f"  _(сброс в 10:00 МСК каждый день)_",
+    ]
+    return "\n".join(lines)
+
+
+# ── QWEN RPD TRACKING ─────────────────────────────────────────
+
+def _qwen_day_start() -> float:
+    """Unix timestamp of the last 03:00 MSK reset (= 00:00 UTC)."""
+    now_utc = time.time()
+    now_msk_secs = now_utc + _MSK_OFFSET
+    msk_midnight_utc = now_utc - (now_msk_secs % 86400)
+    reset_utc = msk_midnight_utc + _QWEN_RESET_HOUR * 3600
+    if now_utc < reset_utc:
+        reset_utc -= 86400
+    return reset_utc
+
+
+def _qwen_hours_until_reset() -> str:
+    next_reset = _qwen_day_start() + 86400
+    secs = next_reset - time.time()
+    if secs <= 0:
+        return "0"
+    h = secs / 3600
+    return f"{h:.0f}" if h >= 1 else f"{secs/60:.0f}м"
+
+
+def get_qwen_prompts_today() -> int:
+    try:
+        from config import DB_PATH
+        from db_manager import Database
+        db = Database(DB_PATH)
+        day_start = _qwen_day_start()
+        dt = datetime.fromtimestamp(day_start).strftime('%Y-%m-%d %H:%M:%S')
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(*) FROM usage_log WHERE agent = 'qwen' AND timestamp > ?",
+                (dt,)
+            )
+            return cursor.fetchone()[0]
+    except Exception:
+        return 0
+
+
+def get_qwen_status() -> str:
+    count = get_qwen_prompts_today()
+    remaining = max(0, _QWEN_PROMPT_CRIT - count)
+    hrs = _qwen_hours_until_reset()
+    icon = "🔴" if count >= _QWEN_PROMPT_CRIT else ("🟡" if count >= _QWEN_PROMPT_WARN else "🟢")
+    lines = [
+        f"\n🟡 *Qwen — дневной лимит*",
+        f"  {icon} Промптов сегодня: *{count}* / {_QWEN_PROMPT_CRIT}",
+        f"  Осталось: ~{remaining}",
+        f"  Сброс через: {hrs}",
+        f"  _(сброс в 03:00 МСК / 00:00 UTC)_",
+    ]
+    return "\n".join(lines)

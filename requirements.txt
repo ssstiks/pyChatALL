@@ -1,4 +1,7 @@
 # pyChatALL Backend Dependencies
+# Core bot dependency
+requests>=2.28.0
+
 # FastAPI and Web Server
 fastapi==0.104.1
 uvicorn==0.24.0

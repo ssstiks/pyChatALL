@@ -75,6 +75,8 @@ from agents import (
     _or_fetch_models, or_search_models, _or_cb, _or_model_label, _or_id_map,
     OR_MODELS_TTL,
     ask_ollama, async_ask_ollama,
+    _OLLAMA_MODEL_NOT_FOUND, ollama_pull_model, get_ollama_models,
+    _ollama_active_pulls,
 )
 from ui import (
     _split_text, _tg_send_one, tg_send, tg_edit, tg_answer_cb, tg_typing,
@@ -87,6 +89,9 @@ from ui import (
     send_reset_menu, send_models_menu,
     send_setup_menu, send_discuss_menu,
     send_or_model_menu, send_or_model_search,
+    send_ollama_panel, send_ollama_installed_menu, send_ollama_pull_menu,
+    send_ollama_rm_menu, send_ollama_confirm_rm, send_ollama_model_not_found,
+    send_settings_panel,
 )
 
 import team_mode
@@ -105,6 +110,9 @@ _no_timeout_event: asyncio.Event  # initialised in _async_main()
 _last_request: dict = {}
 _last_request_lock = threading.Lock()
 
+# workdir await: [0] = msg_id of the prompt message (or None)
+_workdir_await_msg_id: list[int | None] = [None]
+
 AGENT_FN = {
     "claude":      ask_claude,
     "openrouter":  ask_openrouter,
@@ -122,6 +130,66 @@ PREFIX_MAP = {
     "/ollama":     "ollama",
     "/ol":         "ollama",
 }
+
+
+# ── STREAMING ────────────────────────────────────────────────
+# Agents that support token-by-token streaming.
+# Claude: stream-json CLI format.  OpenRouter/Ollama: SSE HTTP.
+# Gemini and Qwen CLI have no parseable incremental output.
+_STREAMING_AGENTS = frozenset({"claude", "openrouter", "ollama"})
+
+
+class _StreamEditor:
+    """Throttle-edits the placeholder TG message as streaming tokens arrive.
+
+    push(chunk) — call from worker thread for each token.
+    stop()      — called on user cancel to suppress further edits.
+    started     — True once first chunk has arrived.
+    """
+    MIN_INTERVAL = 1.5  # minimum seconds between TG editMessageText calls
+    CURSOR       = " ▌"
+
+    def __init__(self, ph_id: int | None, lbl: str):
+        self.ph_id      = ph_id
+        self.lbl        = lbl
+        self.buf        = ""
+        self._last_edit = 0.0
+        self._lock      = threading.Lock()
+        self._started   = threading.Event()
+        self._stopped   = False
+
+    def push(self, chunk: str) -> None:
+        if self._stopped:
+            return
+        with self._lock:
+            self.buf += chunk
+        self._started.set()
+        if time.time() - self._last_edit >= self.MIN_INTERVAL:
+            self._render(cursor=True)
+
+    def stop(self) -> None:
+        self._stopped = True
+
+    @property
+    def started(self) -> bool:
+        return self._started.is_set()
+
+    def _render(self, cursor: bool) -> None:
+        with self._lock:
+            text = self.buf
+        if not self.ph_id or not text:
+            return
+        suffix = self.CURSOR if cursor else ""
+        header = f"[{self.lbl}]\n"
+        full   = header + text + suffix
+        # Trim to TG limit during streaming; final edit is done by route_and_reply.
+        if len(full) > TG_MAX_LEN:
+            full = full[:TG_MAX_LEN - 4] + "… ▌"
+        try:
+            tg_edit(self.ph_id, full)
+            self._last_edit = time.time()
+        except Exception:
+            pass
 
 
 # ── PID-LOCK (защита от дублей) ───────────────────────────────
@@ -189,6 +257,66 @@ def cmd_sessions() -> str:
     return "\n".join(lines)
 
 
+def _send_export_menu() -> None:
+    """Show export options to the user."""
+    from config import WORK_DIR, STATE_DIR
+    import shutil
+    _, _, free = shutil.disk_usage("/tmp")
+    free_mb = free // (1024 * 1024)
+    text = (
+        "📦 Экспорт данных бота\n\n"
+        f"STATE: `{STATE_DIR}`\n"
+        f"WORK_DIR: `{WORK_DIR}`\n\n"
+        "Выбери что экспортировать:"
+    )
+    markup = kb([
+        [("📦 Состояние бота (~1 МБ)", "export:state")],
+        [("📁 + Метаданные проектов", "export:metadata")],
+        [("💡 rsync команды (полная копия)", "export:rsync")],
+    ])
+    tg_send(text, markup)
+
+
+def _do_export(mode: str, msg_id: int | None) -> None:
+    """Run export in background thread and send result to user."""
+    import export_manager
+    try:
+        if mode == "rsync":
+            tg_send(export_manager.rsync_commands())
+            return
+
+        if mode == "state":
+            path, size = export_manager.create_state_export()
+        else:  # metadata
+            path, size = export_manager.create_metadata_export()
+
+        size_mb = size / (1024 * 1024)
+        if size_mb < 48:
+            # Send via Telegram
+            import requests as _req
+            from config import API, ALLOWED_CHAT
+            send_url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
+            with open(path, "rb") as f:
+                _req.post(
+                    send_url,
+                    data={"chat_id": ALLOWED_CHAT,
+                          "caption": f"📦 {os.path.basename(path)} ({size_mb:.1f} МБ)"},
+                    files={"document": f},
+                    timeout=120,
+                )
+            os.remove(path)
+        else:
+            tg_send(
+                f"📦 Архив создан: `{path}`\n"
+                f"Размер: {size_mb:.1f} МБ (слишком большой для TG)\n\n"
+                f"Скопируй командой:\n"
+                f"`scp {path} user@vps:/tmp/`"
+            )
+    except Exception as e:
+        log_error("export", e)
+        tg_send(f"❌ Ошибка экспорта: {e}")
+
+
 def cmd_reset(arg: str) -> str:
     agent = arg.strip().lower() if arg.strip() else get_active()
     if agent == "all":
@@ -206,10 +334,11 @@ def cmd_reset(arg: str) -> str:
     if agent not in AGENT_NAMES:
         return f"⚠️ Неизвестно: {arg}. Используй: claude/gemini/qwen/openrouter/ollama/all"
     sf_map = {
-        "claude":     (CLAUDE_SESSION, CLAUDE_CTX_FILE),
-        "gemini":     (GEMINI_SESSION, GEMINI_CTX_FILE),
-        "qwen":       (QWEN_SESSION,   QWEN_CTX_FILE),
-        "openrouter": (None, None),
+        "claude":     (CLAUDE_SESSION,  CLAUDE_CTX_FILE),
+        "gemini":     (GEMINI_SESSION,  GEMINI_CTX_FILE),
+        "qwen":       (QWEN_SESSION,    QWEN_CTX_FILE),
+        "openrouter": (None,            None),
+        "ollama":     (OLLAMA_SESSION,  OLLAMA_CTX_FILE),
     }
     sf, cf = sf_map[agent]
     if sf:
@@ -422,6 +551,64 @@ def cmd_git(subcmd: str = "") -> None:
             f.write(cwd)
 
 
+# ── OLLAMA MODEL MANAGEMENT ──────────────────────────────────
+
+def _ollama_send(text: str):
+    """Send TG message and return its message_id (int or None)."""
+    msg = tg_send(text)
+    return msg["message_id"] if msg else None
+
+
+def _ollama_edit(msg_id, text: str):
+    if msg_id:
+        tg_edit(msg_id, text)
+
+
+def _ollama_start_pull(model: str) -> None:
+    """Check disk space, then start background ollama pull."""
+    import shutil as _shutil
+    free_gb = _shutil.disk_usage("/").free / (1024 ** 3)
+    if free_gb < 1.5:
+        tg_send(
+            f"❌ Недостаточно места на диске: {free_gb:.1f} ГБ свободно.\n"
+            "Для большинства моделей нужно минимум 2–10 ГБ."
+        )
+        return
+    if _ollama_active_pulls.get(model):
+        tg_send(f"⏳ `{model}` уже устанавливается...")
+        return
+    warn = ""
+    if free_gb < 5:
+        warn = f"\n⚠️ Мало места: {free_gb:.1f} ГБ — модели >4 ГБ не поместятся."
+    tg_send(
+        f"⏳ Начинаю загрузку `{model}`...{warn}\n"
+        "Можно пока использовать другого агента (/gemini, /claude).\n"
+        "Когда установится — пришлю уведомление."
+    )
+    ollama_pull_model(model, _ollama_send, _ollama_edit)
+
+
+def _ollama_rm(model: str, msg_id: int | None = None) -> None:
+    """Remove an installed Ollama model."""
+    try:
+        r = subprocess.run(
+            ["ollama", "rm", model],
+            capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode == 0:
+            from agents import _CLI_MODELS_CACHE
+            _CLI_MODELS_CACHE.pop("ollama", None)
+            send_ollama_rm_menu(msg_id)
+        else:
+            err = (r.stdout + r.stderr).strip()[:300]
+            if msg_id:
+                tg_edit(msg_id, f"❌ Ошибка удаления `{model}`:\n{err}")
+            else:
+                tg_send(f"❌ Ошибка удаления `{model}`:\n{err}")
+    except Exception as e:
+        tg_send(f"❌ {e}")
+
+
 # ── SEND TO AGENT (для /retry) ────────────────────────────────
 def send_to_agent(agent: str, prompt: str, file_path: str | None = None) -> None:
     """Отправляет промпт конкретному агенту и публикует ответ в чат."""
@@ -612,6 +799,23 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
         threading.Thread(target=_do_commit, daemon=True).start()
         return
 
+    # Режим ожидания нового WORK_DIR
+    if _workdir_await_msg_id[0] is not None and text and not text.startswith("/"):
+        new_path = text.strip()
+        mid = _workdir_await_msg_id[0]
+        _workdir_await_msg_id[0] = None
+        if not os.path.isdir(new_path):
+            tg_edit(mid, f"❌ Папка не существует:\n`{new_path}`\n\nПроверь путь и попробуй снова.")
+        else:
+            from config import _WORK_DIR_FILE
+            open(_WORK_DIR_FILE, "w").write(new_path)
+            tg_edit(mid,
+                f"✅ Workspace сохранён:\n`{new_path}`\n\n"
+                "Изменение вступит в силу после перезапуска бота.\n"
+                "Используй /restart или перезапусти вручную."
+            )
+        return
+
     # Режим ожидания code review
     if team_mode.code_review_await_get() and text and not text.startswith("/"):
         team_mode.code_review_await_clear()
@@ -674,6 +878,28 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
 
     if text == "/setup":
         threading.Thread(target=send_setup_menu, daemon=True).start()
+        return
+
+    if text in ("/gemini_lite", "/glite"):
+        from agents import get_gemini_lite, set_gemini_lite, _get_gemini_cwd
+        new_val = not get_gemini_lite()
+        set_gemini_lite(new_val)
+        cwd_now = _get_gemini_cwd()
+        if new_val:
+            tg_send(
+                f"💬 Gemini *Лайт-режим* включён.\n"
+                f"Gemini будет работать без сканирования файлов проекта.\n"
+                f"CWD: `{cwd_now}`\n\n"
+                "Экономия: ~10-20× меньше скрытых API-запросов.\n"
+                "Отключить: /gemini_lite"
+            )
+        else:
+            tg_send(
+                f"🌲 Gemini *Код-режим* включён.\n"
+                f"Gemini будет сканировать файлы активного проекта.\n"
+                f"CWD: `{cwd_now}`\n\n"
+                "Включить лайт: /gemini_lite"
+            )
         return
 
     if text == "/retry":
@@ -834,6 +1060,30 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
     if text == "/sessions":
         tg_send(cmd_sessions())
         return
+
+    if text in ("/export", "/settings"):
+        if text == "/settings":
+            send_settings_panel()
+        else:
+            _send_export_menu()
+        return
+
+    if text.startswith("/workdir"):
+        arg = text[len("/workdir"):].strip()
+        if not arg:
+            from config import WORK_DIR, _WORK_DIR_FILE
+            tg_send(f"📂 Текущий WORK_DIR:\n`{WORK_DIR}`\n\n"
+                    f"Чтобы изменить:\n`/workdir /путь/к/папке`")
+        else:
+            if not os.path.isdir(arg):
+                tg_send(f"❌ Папка не существует: `{arg}`")
+            else:
+                from config import _WORK_DIR_FILE
+                os.makedirs(os.path.dirname(_WORK_DIR_FILE), exist_ok=True)
+                open(_WORK_DIR_FILE, "w").write(arg)
+                tg_send(f"✅ WORK_DIR сохранён: `{arg}`\n"
+                        f"Перезапусти бота чтобы изменение вступило в силу:\n`/restart`")
+        return
     if text.startswith("/reset"):
         parts = text.split(maxsplit=1)
         tg_send(cmd_reset(parts[1] if len(parts) > 1 else ""))
@@ -924,16 +1174,6 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
                 threading.Thread(target=send_or_model_search, args=(query,), daemon=True).start()
                 return
 
-        if agent == "ollama" and prompt:
-            if prompt.startswith("models") or prompt.startswith("/models"):
-                from agents import get_ollama_models
-                models = get_ollama_models()
-                if models:
-                    tg_send("🦙 Ollama модели:\n" + "\n".join(f"  • {m}" for m in models))
-                else:
-                    tg_send("❌ Ollama недоступна или моделей нет.\nЗапустите: ollama serve")
-                return
-
         if prompt and prompt.startswith("/model"):
             model_arg = prompt[len("/model"):].strip()
             if agent == "openrouter" and model_arg.startswith("search"):
@@ -944,13 +1184,63 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
             return
 
         if prompt is None and file_path is None:
-            tg_send(f"🔄 Активный агент: {agent_label(agent)}")
+            if agent == "ollama":
+                send_ollama_panel()
+            else:
+                tg_send(f"🔄 Активный агент: {agent_label(agent)}")
             return
         if prompt is None:
             prompt = "Обработай этот файл."
     else:
         agent = get_active()
         prompt = text
+
+    # ── Pass-through CLI commands for active agent ─────────────
+    # e.g. user types "/config" or "/status" when Claude is active
+    if prompt and prompt.startswith("/"):
+        _cli_known = {cmd for cmd, *_ in AGENT_CLI_CMDS.get(agent, [])}
+        _cmd_word = prompt.split()[0]  # "/compact" etc.
+        if _cmd_word in _cli_known:
+            _ag_bins = {
+                "claude": (CLAUDE_BIN, CLAUDE_SESSION),
+                "gemini": (GEMINI_BIN, GEMINI_SESSION),
+                "qwen":   (QWEN_BIN,   QWEN_SESSION),
+            }
+            if agent in _ag_bins:
+                _bin, _sf = _ag_bins[agent]
+                _mid = tg_send(f"⏳ {agent_label(agent)}: выполняю {_cmd_word}...")
+                def _do_passthrough(b=_bin, sf=_sf, ag=agent, cli=_cmd_word, mid=_mid):
+                    reply = _run_passthrough(b, sf, AGENT_NAMES[ag], cli)
+                    tg_edit(mid, f"[{agent_label(ag)}] {cli}\n\n{reply}")
+                threading.Thread(target=_do_passthrough, daemon=True).start()
+                return
+
+    # ── Ollama management commands (works with or without /ollama prefix) ──
+    if agent == "ollama" and prompt:
+        import re as _re_ol
+        _ol_cmd = _re_ol.match(
+            r'^(?:ollama\s+)?(pull|run|rm|remove|list|ps|models)\s*(.*)$',
+            prompt.strip(), _re_ol.IGNORECASE,
+        )
+        if _ol_cmd:
+            sub, arg = _ol_cmd.group(1).lower(), _ol_cmd.group(2).strip()
+            if sub in ("list", "ps", "models"):
+                models = get_ollama_models()
+                if models:
+                    tg_send("🦙 Установленные модели Ollama:\n" + "\n".join(f"  • {m}" for m in models))
+                else:
+                    tg_send("❌ Ollama недоступна или моделей нет.\nЗапустите: ollama serve")
+            elif sub in ("rm", "remove"):
+                if arg:
+                    threading.Thread(target=_ollama_rm, args=(arg,), daemon=True).start()
+                else:
+                    tg_send("Укажи модель: `ollama rm <model>`")
+            elif sub in ("pull", "run"):
+                if arg:
+                    _ollama_start_pull(arg)
+                else:
+                    tg_send("Укажи модель: `ollama pull <model>`\nСписок моделей: https://ollama.com/library")
+            return
 
     if not prompt and file_path:
         prompt = "Опиши / обработай этот файл."
@@ -998,6 +1288,13 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
         _cancel_event.clear()
         return
 
+    # Streaming: create editor for capable agents.
+    # Disabled for Claude when translation is active (user would see EN tokens
+    # followed by a sudden full-RU replacement, which is confusing).
+    _stream_editor: "_StreamEditor | None" = None
+    if agent in _STREAMING_AGENTS and not _translate_active:
+        _stream_editor = _StreamEditor(ph_id, lbl)
+
     result_box: list[str] = []
     timed_out   = False
     cancelled   = False
@@ -1013,7 +1310,10 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
             agent_prompt = en_prompt
         else:
             agent_prompt = prompt
-        raw_reply = AGENT_FN[agent](agent_prompt, file_path)
+        if _stream_editor is not None:
+            raw_reply = AGENT_FN[agent](agent_prompt, file_path, _stream_editor.push)
+        else:
+            raw_reply = AGENT_FN[agent](agent_prompt, file_path)
         # Translate response back to RU
         if _translate_active:
             raw_reply = translator.translate_to_ru(raw_reply)
@@ -1034,6 +1334,8 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
         # 1. Cancel (highest priority)
         if _cancel_event.is_set():
             cancel_active_proc()
+            if _stream_editor is not None:
+                _stream_editor.stop()
             t.join(3)
             cancelled = True
             break
@@ -1061,12 +1363,13 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
             timed_out = True
             break
 
-        # 5. Heartbeat
+        # 5. Heartbeat (suppressed while streaming — stream editor handles updates)
         hb_interval = HB_FAST_EVERY if elapsed < HB_FAST_SECS else HB_SLOW_EVERY
         if now - last_hb >= hb_interval:
-            last_hb   = now
-            remaining = None if no_limit else max(0, int(deadline - now))
-            _edit_placeholder(ph_id, lbl, elapsed, remaining, no_limit)
+            last_hb = now
+            if _stream_editor is None or not _stream_editor.started:
+                remaining = None if no_limit else max(0, int(deadline - now))
+                _edit_placeholder(ph_id, lbl, elapsed, remaining, no_limit)
 
     if cancelled:
         _cancel_event.clear()
@@ -1086,6 +1389,12 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
         return
 
     reply = result_box[0] if result_box else "❌ Нет ответа"
+
+    # ── Ollama: model not found → show management panel ───────
+    if reply == _OLLAMA_MODEL_NOT_FOUND:
+        model = get_model("ollama") or "llama3.2"
+        send_ollama_model_not_found(model, ph_id)
+        return
 
     shared_ctx_add("assistant", reply, AGENT_NAMES[agent])
     log(f"{AGENT_NAMES[agent]}: {reply[:80]}...")
@@ -1146,6 +1455,11 @@ def handle_callback(cb: dict) -> None:
             tg_edit(msg_id, "❌ Запрос отменён")
         return
 
+    elif data.startswith("export:"):
+        tg_answer_cb(cb_id, "⏳ Создаю архив...")
+        mode = data.split(":", 1)[1]
+        threading.Thread(target=_do_export, args=(mode, msg_id), daemon=True).start()
+
     elif data == "retry_last":
         tg_answer_cb(cb_id, "🔄 Повторяю запрос...")
         with _last_request_lock:
@@ -1175,6 +1489,29 @@ def handle_callback(cb: dict) -> None:
         else:
             tg_answer_cb(cb_id, "Нет активного запроса")
 
+    elif data.startswith("ollama:"):
+        sub = data[len("ollama:"):]
+        tg_answer_cb(cb_id)
+        if sub == "panel":
+            send_ollama_panel(msg_id)
+        elif sub == "list":
+            send_ollama_installed_menu(msg_id)
+        elif sub == "pull_menu":
+            send_ollama_pull_menu(msg_id)
+        elif sub == "rm_menu":
+            send_ollama_rm_menu(msg_id)
+        elif sub == "library":
+            tg_send("🌐 Каталог моделей Ollama:\nhttps://ollama.com/library\n\nОтправь боту: `ollama pull <model>`")
+        elif sub.startswith("pull:"):
+            model = sub[len("pull:"):]
+            _ollama_start_pull(model)
+        elif sub.startswith("confirm_rm:"):
+            model = sub[len("confirm_rm:"):]
+            send_ollama_confirm_rm(model, msg_id)
+        elif sub.startswith("do_rm:"):
+            model = sub[len("do_rm:"):]
+            threading.Thread(target=_ollama_rm, args=(model, msg_id), daemon=True).start()
+
     elif data.startswith("agent:"):
         agent = data.split(":", 1)[1]
         if agent in AGENT_NAMES:
@@ -1194,7 +1531,10 @@ def handle_callback(cb: dict) -> None:
         if sf:
             _reset_session(sf, cf)
         tg_answer_cb(cb_id, f"✅ {AGENT_NAMES[agent]}: {model}")
-        send_model_menu(agent, msg_id)
+        if agent == "ollama":
+            send_ollama_installed_menu(msg_id)
+        else:
+            send_model_menu(agent, msg_id)
 
     elif data.startswith("models:"):
         agent = data.split(":", 1)[1]
@@ -1271,6 +1611,10 @@ def handle_callback(cb: dict) -> None:
         set_model("openrouter", model_id)
         tg_answer_cb(cb_id, f"✅ {model_id.split('/')[-1]}")
         send_or_model_menu(msg_id)
+
+    elif data == "cmd:menu":
+        tg_answer_cb(cb_id)
+        send_agent_menu()
 
     elif data == "or_menu":
         tg_answer_cb(cb_id)
@@ -1412,6 +1756,35 @@ def handle_callback(cb: dict) -> None:
         else:
             tg_send("🧠 Память пуста.\n\nДобавить: /remember <факт>")
 
+    elif data == "cmd:export":
+        tg_answer_cb(cb_id)
+        _send_export_menu()
+
+    elif data == "cmd:settings":
+        tg_answer_cb(cb_id)
+        send_settings_panel(msg_id)
+
+    elif data == "settings:change_workdir":
+        tg_answer_cb(cb_id)
+        tg_edit(msg_id,
+            "✏️ Введи новый путь к workspace:\n\n"
+            "Например: `/home/user/projects`\n\n"
+            "Бот будет искать проекты в этой папке.\n"
+            "Изменение вступает в силу после перезапуска.",
+            kb([[("❌ Отмена", "cmd:settings")]])
+        )
+        _workdir_await_msg_id[0] = msg_id
+
+    elif data == "gemini:toggle_lite":
+        from agents import get_gemini_lite, set_gemini_lite
+        new_val = not get_gemini_lite()
+        set_gemini_lite(new_val)
+        if new_val:
+            tg_answer_cb(cb_id, "💬 Лайт-режим: чат без сканирования файлов")
+        else:
+            tg_answer_cb(cb_id, "🌲 Режим: код (полный доступ к проекту)")
+        send_agent_menu()
+
     elif data == "cmd:help":
         tg_answer_cb(cb_id)
         tg_send(
@@ -1426,6 +1799,9 @@ def handle_callback(cb: dict) -> None:
             "/remember <факт> — сохранить в память\n"
             "/memory — показать память\n"
             "/forget — очистить память\n\n"
+            "🛑 *Аварийные команды:*\n"
+            "/cancel — прервать текущий запрос и сбросить очередь\n"
+            "/queue — показать состояние очереди\n\n"
             "Файлы/фото: просто отправь.\n"
             "Текст без префикса → активному агенту."
         )
@@ -1454,6 +1830,40 @@ def process_update(upd: dict) -> None:
 
     prompt_text = text or caption
     file_path = None
+
+    # ── Pre-queue emergency commands (bypass the queue entirely) ─
+    if prompt_text in ("/cancel", "/stop"):
+        cancel_active_proc()
+        async_core.call_soon(_cancel_event.set)
+
+        def _force_drain():
+            while True:
+                try:
+                    _request_queue.get_nowait()
+                    _request_queue.task_done()
+                except asyncio.QueueEmpty:
+                    break
+
+        async_core.call_soon(_force_drain)
+        q = _request_queue.qsize()
+        tg_send(
+            f"🛑 Отменено. Очередь сброшена ({q} уд.).\n"
+            "Можешь отправлять новые запросы."
+        )
+        return
+
+    if prompt_text in ("/queue", "/q"):
+        q = _request_queue.qsize()
+        busy = _worker_busy.is_set()
+        if busy or q > 0:
+            tg_send(
+                f"📋 *Очередь:* {q} ожидают\n"
+                f"{'⚙️ Обрабатывается запрос прямо сейчас' if busy else ''}\n\n"
+                "Отправь /cancel чтобы прервать и сбросить очередь."
+            )
+        else:
+            tg_send("✅ Очередь пуста, бот свободен.")
+        return
 
     if prompt_text and prompt_text.startswith("/limit"):
         import rate_tracker

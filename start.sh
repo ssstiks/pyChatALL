@@ -81,13 +81,28 @@ case "${1:-start}" in
 
         cd "$SCRIPT_DIR"
 
+        # Загружаем токен из файла если не задан в окружении
+        TOKEN_FILE="$HOME/.local/share/pyChatALL/token.txt"
+        if [[ -z "${TG_BOT_TOKEN:-}" ]] && [[ -f "$TOKEN_FILE" ]]; then
+            TG_BOT_TOKEN="$(cat "$TOKEN_FILE" | tr -d '[:space:]')"
+            export TG_BOT_TOKEN
+            echo "   Токен загружен из $TOKEN_FILE"
+        fi
+
+        # Проверяем TG_BOT_TOKEN
+        if [[ -z "${TG_BOT_TOKEN:-}" ]]; then
+            echo "⚠️  Переменная TG_BOT_TOKEN не задана."
+            echo "   Варианты:"
+            echo "   1) echo 'ВАШ_ТОКЕН' > ~/.local/share/pyChatALL/token.txt"
+            echo "   2) export TG_BOT_TOKEN=<токен> && ./start.sh"
+            echo "   3) Добавь в ~/.bashrc / ~/.zshrc"
+            exit 1
+        fi
+
         # Проверяем наличие зависимостей
         if ! $PYTHON -c "import requests" 2>/dev/null; then
-            echo "⚠️  Пакет 'requests' не найден. Установить? [y/N]"
-            read -r ans
-            if [[ "$ans" =~ ^[Yy]$ ]]; then
-                pip install -r requirements.txt
-            fi
+            echo "⚠️  Пакет 'requests' не найден. Устанавливаю..."
+            pip install requests --quiet
         fi
 
         # Пробрасываем proxy-переменные если nekobox/другой прокси слушает на 2080
