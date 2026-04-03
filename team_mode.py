@@ -94,7 +94,8 @@ def _p_sessions(proj: str = "") -> dict[str, str]:
 def _project_info(proj: str) -> str:
     """Краткая информация о проекте: последняя задача из лога."""
     try:
-        log = open(_p_file("project_log.md", proj)).read()
+        with open(_p_file("project_log.md", proj)) as _f:
+            log = _f.read()
         # Берём последний заголовок ## [дата] ...
         lines = [l for l in log.splitlines() if l.startswith("## [")]
         if lines:
@@ -294,7 +295,8 @@ def _append_project_log(task: str, rounds: int, verdict: str):
 
     coder_summary = ""
     try:
-        txt = open(_p_file("coder_output.md")).read().strip()
+        with open(_p_file("coder_output.md")) as _f:
+            txt = _f.read().strip()
         coder_summary = txt[:400].split("\n\n\n")[0].strip()
     except Exception:
         pass
@@ -318,7 +320,8 @@ def _append_project_log(task: str, rounds: int, verdict: str):
 def _project_context() -> str:
     """Читает журнал проекта для инжекции в промпты агентов."""
     try:
-        content = open(_p_file("project_log.md")).read().strip()
+        with open(_p_file("project_log.md")) as _f:
+            content = _f.read().strip()
         if not content:
             return ""
         if len(content) > PROJECT_LOG_MAX_CHARS:
@@ -476,7 +479,8 @@ def _fixer_prompt(fix_round: int, prev_round: int) -> str:
     # Load and sanitize the debugger report so Coder never sees raw CLI traces
     debug_summary = ""
     try:
-        raw_report = open(_p_file(f"debug_round_{prev_round}.md")).read()
+        with open(_p_file(f"debug_round_{prev_round}.md")) as _f:
+            raw_report = _f.read()
         debug_summary = _sanitize_for_agent(raw_report, max_chars=300)
     except Exception:
         pass
@@ -649,7 +653,8 @@ def _detect_test_cmd(proj_dir: str) -> str | None:
     if os.path.exists(pkg_json):
         try:
             import json as _json
-            data = _json.load(open(pkg_json))
+            with open(pkg_json) as _f:
+                data = _json.load(_f)
             if "test" in data.get("scripts", {}):
                 return "npm test"
         except Exception:
@@ -1430,7 +1435,8 @@ def handle_team_callback(cb_id: str, msg_id: int, data: str):
     elif data == "team_project_log":
         _bot.tg_answer_cb(cb_id)
         try:
-            content = open(_p_file("project_log.md")).read().strip()
+            with open(_p_file("project_log.md")) as _f:
+                content = _f.read().strip()
             proj    = _cur_project() or "—"
             back    = _bot.kb([[("← Меню", "team_menu")]])
             header  = f"📖 История проекта «{proj}»:\n\n"
@@ -1449,7 +1455,8 @@ def handle_team_callback(cb_id: str, msg_id: int, data: str):
     elif data == "team_log":
         _bot.tg_answer_cb(cb_id)
         try:
-            lines = open(_p_file("team_log.md")).readlines()
+            with open(_p_file("team_log.md")) as _f:
+                lines = _f.readlines()
             last  = "".join(lines[-25:])
             back  = _bot.kb([[("← Меню", "team_menu")]])
             text  = f"📋 Лог (последние 25):\n\n{last}"
@@ -1661,7 +1668,8 @@ def handle_command(text: str):
 
     elif sub == "log":
         try:
-            lines = open(_p_file("team_log.md")).readlines()
+            with open(_p_file("team_log.md")) as _f:
+                lines = _f.readlines()
             _bot.tg_send("📋 Лог:\n\n" + "".join(lines[-20:]))
         except Exception:
             _bot.tg_send("Лог пуст.")

@@ -138,7 +138,8 @@ def get_safe_estimate(agent: str) -> dict:
             "5h_count": count_5h, "5h_limit": lim_5h,
             "week_count": count_week, "week_limit": lim_week
         }
-    except:
+    except Exception as e:
+        _logger.warning("get_safe_estimate failed: %s", e)
         return {"pct": 100, "5h_count": 0, "5h_limit": 45, "week_count": 0, "week_limit": 400}
 
 def get_all_status() -> str:
