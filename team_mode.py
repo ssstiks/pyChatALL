@@ -199,9 +199,8 @@ def _call_agent(agent: str, prompt: str, timeout: int = 300) -> str:
     model = _bot.get_model(agent)
     cmd = [binary]
     if is_claude:
-        cmd += ["--print", "--dangerously-skip-permissions"]
-    cmd += ["--output-format", "json"]
-    if not is_claude:
+        cmd += ["--print", "--dangerously-skip-permissions", "--output-format", "json"]
+    else:
         cmd += ["--yolo"]
     if model:
         cmd += ["--model", model]
