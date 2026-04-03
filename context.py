@@ -401,9 +401,10 @@ def _build_lessons_block(active_projects: list) -> str:
         return ""
 
 
-def global_ctx_for_prompt(skip_recent: bool = False) -> str:
+def global_ctx_for_prompt(skip_recent: bool = False, query: str = "") -> str:
     """
     Token-efficient context injection:
+      [RELEVANT_MEMORY: ...]    ← LightRAG semantic retrieval (when query given)
       [MEMORY: {JSON}]          ← English summary (~200-400 tokens)
       [Recent context (RU): ...]  ← Last 3 raw RU messages (skipped when skip_recent=True)
 
@@ -415,7 +416,17 @@ def global_ctx_for_prompt(skip_recent: bool = False) -> str:
     """
     parts: list[str] = []
 
-    # 1. English memory JSON block (always included)
+    # 1. LightRAG semantic context — relevant facts from knowledge graph
+    if query:
+        try:
+            from lightrag_manager import rag_query
+            rag_ctx = rag_query(query[:400])
+            if rag_ctx:
+                parts.append(f"[RELEVANT_MEMORY:\n{rag_ctx}\n]")
+        except Exception:
+            pass
+
+    # 2. English memory JSON block (always included)
     mm = get_memory_manager()
     parts.append(mm.to_prompt_block())
 

@@ -457,7 +457,7 @@ def _run_cli(binary: str, session_file: str, ctx_file: str,
 
     # skip_recent=True when Claude has active session (CLI already has history)
     sid = _load_session(session_file) if is_claude else None
-    ctx_text = global_ctx_for_prompt(skip_recent=bool(sid))
+    ctx_text = global_ctx_for_prompt(skip_recent=bool(sid), query=original_prompt[:400])
 
     parts = []
     if ctx_text:

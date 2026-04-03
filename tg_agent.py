@@ -1966,6 +1966,13 @@ async def _async_main() -> None:
     ensure_db()
     threading.excepthook = _thread_excepthook
 
+    # Start LightRAG knowledge-graph memory in background (non-blocking)
+    try:
+        from lightrag_manager import init_background
+        init_background()
+    except Exception:
+        pass
+
     log_info(f"=== tg_agent запущен === PID={os.getpid()}")
     log_info(f"Active agent: {get_active()} | Work dir: {WORK_DIR}")
 

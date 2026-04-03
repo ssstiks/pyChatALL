@@ -279,6 +279,14 @@ class MemoryManager:
                     self.save(updated)
                     log.info("shadow librarian: memory updated — %s",
                              updated.get("short_term_context", "")[:80])
+                    # Feed new context into LightRAG knowledge graph
+                    try:
+                        from lightrag_manager import rag_insert_background
+                        ctx_text = updated.get("short_term_context", "")
+                        if ctx_text:
+                            rag_insert_background(ctx_text)
+                    except Exception as _e:
+                        log.debug("LightRAG feed skipped: %s", _e)
                     # After saving, attempt lesson extraction in the same thread
                     ctx = updated.get("short_term_context", "")
                     projects = updated.get("project_state", {}).get("active_projects", [])
