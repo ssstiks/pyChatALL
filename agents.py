@@ -577,9 +577,14 @@ def _run_cli(binary: str, session_file: str, ctx_file: str,
             time.sleep(2)
             stdout, stderr, rc, timed_out = _run_subprocess(cmd, timeout_secs, _cwd, env)
 
-        # Claude: expired/invalid --resume session → reset and retry once
-        if is_claude and "No conversation found" in (stdout + stderr):
-            log_warn("Claude: session not found — resetting and retrying without --resume")
+        # Any CLI agent: expired/invalid --resume session → reset and retry once
+        _SESSION_EXPIRED_MARKERS = (
+            "No conversation found",       # Claude
+            "No saved session found",      # Qwen
+            "Session not found",           # Gemini / future agents
+        )
+        if any(m in (stdout + stderr) for m in _SESSION_EXPIRED_MARKERS):
+            log_warn(f"{agent_name}: session not found — resetting and retrying without --resume")
             _reset_session(session_file, ctx_file)
             cmd_retry = []
             skip_next = False
