@@ -577,6 +577,24 @@ def _run_cli(binary: str, session_file: str, ctx_file: str,
             time.sleep(2)
             stdout, stderr, rc, timed_out = _run_subprocess(cmd, timeout_secs, _cwd, env)
 
+        # Claude: expired/invalid --resume session → reset and retry once
+        if is_claude and "No conversation found" in (stdout + stderr):
+            log_warn("Claude: session not found — resetting and retrying without --resume")
+            _reset_session(session_file, ctx_file)
+            cmd_retry = []
+            skip_next = False
+            for tok in cmd:
+                if skip_next:
+                    skip_next = False
+                    continue
+                if tok == "--resume":
+                    skip_next = True
+                    continue
+                cmd_retry.append(tok)
+            stdout, stderr, rc, timed_out = _run_subprocess(
+                cmd_retry, timeout_secs, _cwd, env, stdout_cb=_stdout_line_cb
+            )
+
         elapsed = time.time() - t_start
 
         if timed_out:
