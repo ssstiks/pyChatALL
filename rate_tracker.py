@@ -289,21 +289,20 @@ def get_display(agent: str) -> str:
             icon = "🔴" if pct < 10 else ("🟡" if pct < 40 else "🟢")
             return f"{icon} ~{pct}%"
 
-    # 5. Gemini RPD tracking
+    # 5. Gemini RPD tracking — always show (even 0 prompts) so agent_label()
+    #    never falls back to the misleading ctx_pct() indicator
     if agent == "gemini":
         count = get_gemini_prompts_today()
-        if count > 0:
-            icon = "🔴" if count >= _GEMINI_PROMPT_CRIT else ("🟡" if count >= _GEMINI_PROMPT_WARN else "🟢")
-            hrs = _gemini_hours_until_reset()
-            return f"{icon} {count}💬 {hrs}ч↺"
+        icon = "🔴" if count >= _GEMINI_PROMPT_CRIT else ("🟡" if count >= _GEMINI_PROMPT_WARN else "🟢")
+        hrs = _gemini_hours_until_reset()
+        return f"{icon} {count}💬 {hrs}ч↺"
 
-    # 6. Qwen RPD tracking
+    # 6. Qwen RPD tracking — always show
     if agent == "qwen":
         count = get_qwen_prompts_today()
-        if count > 0:
-            icon = "🔴" if count >= _QWEN_PROMPT_CRIT else ("🟡" if count >= _QWEN_PROMPT_WARN else "🟢")
-            hrs = _qwen_hours_until_reset()
-            return f"{icon} {count}💬 {hrs}ч↺"
+        icon = "🔴" if count >= _QWEN_PROMPT_CRIT else ("🟡" if count >= _QWEN_PROMPT_WARN else "🟢")
+        hrs = _qwen_hours_until_reset()
+        return f"{icon} {count}💬 {hrs}ч↺"
 
     return ""
 
@@ -444,3 +443,47 @@ def get_qwen_status() -> str:
         f"  _(сброс в 03:00 МСК / 00:00 UTC)_",
     ]
     return "\n".join(lines)
+
+
+def get_agent_stats(agent: str) -> str:
+    """
+    Per-agent stats string for the /stats command.
+    Returns a human-readable Markdown-safe status block for the given agent.
+    """
+    if agent == "claude":
+        return get_all_status()   # full Claude rate-limit + OR + Gemini + Qwen summary
+
+    if agent == "gemini":
+        return get_gemini_status()
+
+    if agent == "qwen":
+        return get_qwen_status()
+
+    if agent == "openrouter":
+        with _lock:
+            or_s = dict(_state.get("openrouter", {}))
+        auto = or_s.get("auto", {})
+        auto_ts = or_s.get("auto_ts", 0)
+        if auto and time.time() - auto_ts < 300:
+            lines = ["🌐 *OpenRouter (из заголовков):*"]
+            for dim, v in auto.items():
+                pct = int(v["remaining"] / v["limit"] * 100) if v["limit"] else 0
+                icon = "🟢" if pct >= 40 else ("🟡" if pct >= 10 else "🔴")
+                lines.append(f"  • {icon} {dim.upper()}: {pct}% ({v['remaining']}/{v['limit']})")
+            age = int(time.time() - auto_ts)
+            lines.append(f"  _{age}с назад_")
+            return "\n".join(lines)
+        return "🌐 *OpenRouter:* лимиты неизвестны\n_(обновляются после первого ответа)_"
+
+    if agent == "ollama":
+        try:
+            import requests
+            resp = requests.get("http://localhost:11434/api/tags", timeout=3)
+            models = [m["name"] for m in resp.json().get("models", [])]
+            if models:
+                return "🦙 *Ollama — установленные модели:*\n" + "\n".join(f"  • {m}" for m in models)
+            return "🦙 *Ollama:* нет установленных моделей"
+        except Exception:
+            return "🦙 *Ollama:* недоступна (`ollama serve` не запущен?)"
+
+    return f"❓ Статистика для *{agent}* недоступна"

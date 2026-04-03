@@ -51,13 +51,18 @@ def set_model(agent: str, model: str) -> None:
 
 
 def ctx_pct(agent: str) -> str:
-    """Returns compact ctx-usage indicator: '🟢 5%' / '🟡 47%' / '🔴 83%'."""
+    """Returns session-context indicator: '🟢 5%ctx' / '🟡 47%ctx' / '🔴 83%ctx'.
+    This shows how full the current CLI session window is (chars used / archive limit).
+    Labelled 'ctx' to distinguish from rate-limit % shown by rate_tracker.
+    """
     try:
         used = db.get_context_usage(agent)
         _, archive = CTX_LIMITS.get(agent, (0, 1))
         pct = int(used / archive * 100) if archive else 0
+        if pct == 0:
+            return ""   # Don't show 0%ctx — adds no information
         icon = "🟢" if pct < 50 else ("🟡" if pct < 80 else "🔴")
-        return f"{icon} {pct}%"
+        return f"{icon} {pct}%ctx"
     except Exception:
         return ""
 
