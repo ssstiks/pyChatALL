@@ -336,13 +336,18 @@ class Database:
             return row[0] if row else None
 
     def set_setting(self, key, value, user_id='default'):
-        """Save setting"""
+        """Save setting. If value is None, deletes the row."""
         with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
+            if value is None:
+                conn.execute(
+                    'DELETE FROM settings WHERE user_id = ? AND user_key = ?',
+                    (user_id, key),
+                )
+                return
+            conn.execute(
                 '''INSERT OR REPLACE INTO settings (user_id, user_key, user_value)
                    VALUES (?, ?, ?)''',
-                (user_id, key, str(value))
+                (user_id, key, str(value)),
             )
 
     # ── Knowledge Base (Lessons Learned) ─────────────────────────────────────

@@ -335,7 +335,10 @@ def shared_ctx_for_prompt() -> str:
             lines.append(f"[{ts}] {m.get('agent', '')}: {m['content']}")
     text = "\n".join(lines)
     if len(text) > SHARED_CTX_CHARS:
-        text = "...(обрезано)\n" + text[-SHARED_CTX_CHARS:]
+        start = len(text) - SHARED_CTX_CHARS
+        nl = text.find("\n", start)
+        start = nl + 1 if nl >= 0 else start
+        text = "...(обрезано)\n" + text[start:]
 
     mem = memory_load()
     if mem:

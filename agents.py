@@ -41,6 +41,7 @@ import router
 
 OR_MODELS_TTL = 3600
 _or_id_map: dict[str, str] = {}
+_OR_ID_MAP_MAX = 256
 
 # ── DYNAMIC MODEL DISCOVERY ───────────────────────────────────
 _CLI_MODELS_CACHE: dict[str, tuple[list[str], float]] = {}
@@ -752,7 +753,8 @@ def _get_effective_bin(agent: str) -> str:
     # 1. Custom path saved by user/setup
     path_file = f"{STATE_DIR}/{agent}_bin_path.txt"
     try:
-        p = open(path_file).read().strip()
+        with open(path_file) as _f:
+            p = _f.read().strip()
         if p and os.path.isfile(p):
             _bin_cache[agent] = p
             return p
@@ -1018,7 +1020,8 @@ def _parse_sse_stream(response, stream_cb) -> str:
 def get_openrouter_key() -> str:
     """Читает API ключ из файла, затем из CONFIG."""
     try:
-        key = open(OPENROUTER_KEY_FILE).read().strip()
+        with open(OPENROUTER_KEY_FILE) as _f:
+            key = _f.read().strip()
         if key:
             return key
     except FileNotFoundError:
@@ -1341,6 +1344,8 @@ def _or_cb(model_id: str) -> str:
     if len(cb.encode()) <= 64:
         return cb
     short = hashlib.md5(model_id.encode()).hexdigest()[:10]
+    if len(_or_id_map) >= _OR_ID_MAP_MAX:
+        _or_id_map.pop(next(iter(_or_id_map)))  # evict oldest
     _or_id_map[short] = model_id
     return f"or_model:~{short}"
 

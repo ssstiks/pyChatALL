@@ -54,7 +54,8 @@ QWEN_BIN = (
 _WORK_DIR_FILE = str(pathlib.Path.home() / ".local" / "share" / "pyChatALL" / "work_dir.txt")
 def _load_work_dir() -> str:
     try:
-        p = open(_WORK_DIR_FILE).read().strip()
+        with open(_WORK_DIR_FILE) as _f:
+            p = _f.read().strip()
         if p and os.path.isdir(p):
             return p
     except FileNotFoundError:

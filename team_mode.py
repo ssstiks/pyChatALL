@@ -160,7 +160,8 @@ def _set_phase(phase: str, extra: dict | None = None):
 
 
 def _is_stopped() -> bool:
-    return _load_state()["phase"] in ("STOPPED", "IDLE")
+    with _team_lock:
+        return _load_state()["phase"] in ("STOPPED", "IDLE")
 
 
 # ── ВЫЗОВ АГЕНТОВ ──────────────────────────────────────────────
@@ -214,6 +215,11 @@ def _call_agent(agent: str, prompt: str, timeout: int = 300) -> str:
     env = os.environ.copy()
     for var in ("CLAUDECODE", "GEMINICODE", "QWENCODE"):
         env.pop(var, None)
+    # Gemini connects directly to Google — proxy causes 12s timeouts
+    if agent == "gemini":
+        for var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+                    "ALL_PROXY", "all_proxy"):
+            env.pop(var, None)
 
     # Агент работает в директории своего проекта
     cwd = _project_dir()
@@ -760,7 +766,8 @@ def _pipeline(task: str, roles: dict, start_round: int = 0):
                 if review_round > 1:
                     try:
                         debug_path = _p_file(f"debug_round_{review_round - 1}.md")
-                        raw_debug  = open(debug_path).read()
+                        with open(debug_path) as _f:
+                            raw_debug = _f.read()
                         issue_text = _sanitize_for_agent(raw_debug, max_chars=250)
                         fix_text   = f"Fixed in round {review_round} of task: {task[:150]}"
                         store_experience(issue_text, fix_text, proj)
@@ -1083,7 +1090,8 @@ def send_team_review(message_id: int | None = None):
 
 def _show_file(path: str, title: str, back_cb: str, msg_id: int | None):
     try:
-        content = open(path).read()
+        with open(path) as _f:
+            content = _f.read()
     except FileNotFoundError:
         content = "(файл не найден)"
     back   = _bot.kb([[("← Назад к обзору", back_cb)]])

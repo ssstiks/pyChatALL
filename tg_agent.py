@@ -200,7 +200,8 @@ def _check_single_instance() -> None:
     """Завершает старый процесс если уже запущен."""
     if os.path.exists(PID_FILE):
         try:
-            old_pid = int(open(PID_FILE).read().strip())
+            with open(PID_FILE) as _f:
+                old_pid = int(_f.read().strip())
             if old_pid != os.getpid():
                 try:
                     os.kill(old_pid, 0)
@@ -783,7 +784,8 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
     git_await_file = f"{STATE_DIR}/git_commit_await.txt"
     if os.path.exists(git_await_file) and text and not text.startswith("/"):
         try:
-            cwd = open(git_await_file).read().strip()
+            with open(git_await_file) as _f:
+                cwd = _f.read().strip()
             os.remove(git_await_file)
         except Exception:
             cwd = WORK_DIR

@@ -51,7 +51,8 @@ def colorize(line: str) -> str:
 
 def is_agent_alive() -> tuple[bool, int]:
     try:
-        pid = int(open(PID_FILE).read().strip())
+        with open(PID_FILE) as _f:
+            pid = int(_f.read().strip())
         os.kill(pid, 0)
         return True, pid
     except Exception:
