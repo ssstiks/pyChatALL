@@ -952,16 +952,7 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
     if text == "/stats":
         import rate_tracker as _rt
         agent = get_active()
-        stats_text = _rt.get_agent_stats(agent)
-        # For Claude: also run /cost passthrough to show session token usage
-        if agent == "claude":
-            mid = tg_send(f"⏳ Claude: запрашиваю /cost...")
-            def _do_stats(m=mid, st=stats_text):
-                cost = _run_passthrough(CLAUDE_BIN, CLAUDE_SESSION, "Claude", "/cost")
-                tg_edit(m, f"{st}\n\n💰 *Токены сессии:*\n{cost}")
-            threading.Thread(target=_do_stats, daemon=True).start()
-        else:
-            tg_send(stats_text)
+        tg_send(_rt.get_agent_stats(agent))
         return
 
     if text.startswith("/limit"):
