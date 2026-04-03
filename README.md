@@ -1,32 +1,39 @@
-# pyChatALL
+<div align="center">
 
-Personal Telegram bot that routes messages to multiple AI agents: **Claude, Gemini, Qwen, OpenRouter, Ollama**. Switch agents on the fly, run them in parallel, or chain them in a Planner→Coder→Debugger pipeline.
+# 🤖 pyChatALL
 
----
+**Один Telegram-бот — пять AI-агентов**
 
-## Features
+Переключайся между Claude, Gemini, Qwen, OpenRouter и Ollama прямо в чате.
+Спрашивай всех сразу, запускай командный конвейер, управляй проектами.
 
-- **5 AI backends** — Claude CLI, Gemini CLI, Qwen CLI, OpenRouter API, Ollama (local)
-- **Smart routing** — auto-selects Haiku vs Sonnet based on prompt complexity
-- **Persistent sessions** — CLI agents resume conversations with `--resume <session_id>`
-- **Shared context** — last 6 messages injected into every prompt across all agents
-- **Team Mode** — Planner → Coder → Debugger pipeline with auto-build and auto-commit
-- **Rate tracking** — Gemini (1500 RPD) and Qwen (1000 RPD) quota monitoring
-- **Agent isolation** — each agent runs in its own workspace, never scans the bot's files
-- **Emergency cancel** — `/cancel` kills any stuck process and drains the queue
+[![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python&logoColor=white)](https://python.org)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Telegram](https://img.shields.io/badge/Telegram-Bot-blue?logo=telegram)](https://t.me/BotFather)
+
+</div>
 
 ---
 
-## Requirements
+## ✨ Возможности
 
-- Python 3.10+
-- Telegram bot token from [@BotFather](https://t.me/BotFather)
-- Your Telegram user ID (from [@userinfobot](https://t.me/userinfobot))
-- At least one AI CLI installed: `claude`, `gemini`, or `qwen`
+| | Описание |
+|-|----------|
+| **5 AI-агентов** | Claude, Gemini, Qwen — через CLI; OpenRouter, Ollama — через API |
+| **Умный роутинг** | Автоматически выбирает Haiku или Sonnet по сложности запроса |
+| **Параллельный опрос** | `/all вопрос` — получи ответы от всех агентов сразу |
+| **Командный режим** | Planner → Coder → Debugger с авто-коммитом и авто-сборкой |
+| **Голосовые сообщения** | Транскрипция через Whisper прямо в боте |
+| **Долгосрочная память** | Бот помнит факты между сессиями (`/remember`) |
+| **Мониторинг квот** | Gemini 1500 RPD, Qwen 1000 RPD — предупреждает до исчерпания |
+| **Экстренная отмена** | `/cancel` — убивает зависший процесс, очищает очередь |
+| **Изоляция агентов** | Каждый агент в своей папке, не сканирует лишние файлы |
 
 ---
 
-## Installation
+## 🚀 Установка
+
+### 1. Клонируй репозиторий
 
 ```bash
 git clone https://github.com/ssstiks/pyChatALL.git
@@ -34,133 +41,151 @@ cd pyChatALL
 pip install requests
 ```
 
-### Configure
+### 2. Настрой токен и доступ
+
+Получи токен у [@BotFather](https://t.me/BotFather), свой ID — у [@userinfobot](https://t.me/userinfobot).
 
 ```bash
-# Save your bot token
 mkdir -p ~/.local/share/pyChatALL
-echo 'YOUR_BOT_TOKEN' > ~/.local/share/pyChatALL/token.txt
+echo 'ВАШ_ТОКЕН' > ~/.local/share/pyChatALL/token.txt
 chmod 600 ~/.local/share/pyChatALL/token.txt
 
-# Set your Telegram user ID (only this user can talk to the bot)
-export TG_ALLOWED_CHAT=123456789
+export TG_ALLOWED_CHAT=123456789   # ваш Telegram ID
 ```
 
-Or use environment variables only:
-```bash
-export TG_BOT_TOKEN=your_token
-export TG_ALLOWED_CHAT=123456789
-```
-
-### Install AI agents (install what you need)
+### 3. Установи нужные AI-агенты
 
 ```bash
-# Claude Code CLI
+# Claude (аккаунт Anthropic)
 npm install -g @anthropic-ai/claude-code && claude login
 
-# Gemini CLI
+# Gemini (аккаунт Google)
 npm install -g @google/gemini-cli && gemini
 
-# Qwen Code CLI (requires Node.js >= 20)
+# Qwen (Node.js >= 20, аккаунт Alibaba)
 npm install -g @qwen-code/qwen-code && qwen
 
-# Ollama (local models, no API key needed)
+# Ollama — локальные модели, без API-ключа
 curl -fsSL https://ollama.com/install.sh | sh && ollama pull llama3.2
 ```
 
----
-
-## Running
+### 4. Запусти бота
 
 ```bash
-./start.sh              # start (auto-detects proxy, loads token)
-./start.sh stop         # stop
-./start.sh status       # check if running
-./start.sh logs         # tail live logs
-python3 monitor.py      # real-time console dashboard
+./start.sh          # запуск в фоне
+./start.sh stop     # остановить
+./start.sh logs     # логи в реальном времени
+python3 monitor.py  # консольный дашборд
 ```
 
-### As a systemd service
+---
+
+## 💬 Команды
+
+### Выбор агента
+```
+/claude   /gemini   /qwen   /openrouter   /ollama
+```
+
+### Работа с AI
+```
+/all <вопрос>         — спросить всех агентов параллельно
+/discuss <тема>       — обсуждение: каждый читает ответы предыдущих
+/retry                — повторить последний запрос
+/cancel               — остановить зависший процесс
+```
+
+### Сессия и модели
+```
+/reset [агент|all]    — сбросить сессию
+/ctx                  — использование контекста
+/model [list|имя]     — сменить модель
+/timeout [агент] [с]  — изменить таймаут
+```
+
+### Память и файлы
+```
+/remember <факт>      — запомнить навсегда
+/memory               — показать память
+/files                — браузер файлов проекта
+/git                  — git панель (статус / diff / коммит)
+/search <запрос>      — веб-поиск
+```
+
+### Team Mode — командный конвейер
+```
+/team /new <имя>      — создать проект
+/team /start <задача> — запустить Planner→Coder→Debugger
+/team /status         — статус текущего проекта
+/team /list           — список всех проектов
+```
+
+---
+
+## 🏗️ Архитектура
+
+```
+Сообщение в Telegram
+       │
+       ▼
+ tg_agent.py ──► asyncio.Queue (один запрос за раз)
+       │
+       ├── router.py     выбор модели (Haiku / Sonnet)
+       ├── context.py    +память, +последние 6 сообщений
+       │
+       ▼
+ agents.py
+  ├── Claude CLI subprocess
+  ├── Gemini CLI subprocess   (изолированный CWD, без прокси)
+  ├── Qwen CLI subprocess
+  ├── OpenRouter HTTP API
+  └── Ollama HTTP API
+       │
+       ▼
+  Ответ в Telegram (стриминг)
+```
+
+### Структура файлов
+
+```
+tg_agent.py      Точка входа, polling, команды, очередь
+agents.py        CLI subprocess + HTTP клиенты, изоляция CWD
+router.py        Классификатор сложности (Haiku vs Sonnet)
+context.py       Сессии, общий контекст, память, модели
+team_mode.py     Командный конвейер Planner→Coder→Debugger
+config.py        Все константы, пути, таймауты, лимиты
+rate_tracker.py  Мониторинг квот Gemini и Qwen
+db_manager.py    SQLite: сессии, модели, память, настройки
+ui.py            Telegram UI: клавиатуры, меню, файлы
+voice.py         Транскрипция голоса (Whisper)
+monitor.py       Консольный дашборд
+```
+
+### Хранилище: `~/.local/share/pyChatALL/`
+
+```
+token.txt              токен бота (не коммитится)
+pychatall.db           SQLite база данных
+shared_context.json    последние 6 сообщений (общий контекст)
+global_memory.json     долгосрочная память
+workspaces/claude/     изолированная папка Claude
+workspaces/gemini/     изолированная папка Gemini
+workspaces/qwen/       изолированная папка Qwen
+```
+
+---
+
+## ⚙️ Запуск как системная служба
 
 ```bash
-sudo tee /etc/systemd/system/pychatall.service << EOF
-[Unit]
-Description=pyChatALL Telegram Bot
-After=network-online.target
-
-[Service]
-Type=simple
-User=$USER
-WorkingDirectory=$(pwd)
-Environment="TG_BOT_TOKEN=your_token"
-Environment="TG_ALLOWED_CHAT=123456789"
-ExecStart=$(which python3) $(pwd)/tg_agent.py
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
 sudo systemctl enable --now pychatall
+# см. .env.example для настройки переменных окружения
 ```
+
+Полный пример unit-файла — в разделе [Installation](#-установка).
 
 ---
 
-## Telegram Commands
-
-| Command | Description |
-|---------|-------------|
-| `/claude` `/gemini` `/qwen` `/openrouter` `/ollama` | Switch active agent |
-| `/all <question>` | Ask all agents in parallel |
-| `/discuss <topic>` | Sequential discussion between agents |
-| `/cancel` | Kill stuck process, drain queue |
-| `/retry` | Repeat last request |
-| `/reset [agent\|all]` | Reset session |
-| `/ctx` | Show context usage |
-| `/model [list\|name]` | View or change model |
-| `/remember <fact>` | Save to long-term memory |
-| `/memory` | Show saved memory |
-| `/files` | File browser |
-| `/git` | Git panel (status/diff/commit) |
-| `/team /new <name>` | Create Team Mode project |
-| `/team /start <task>` | Run Planner→Coder→Debugger pipeline |
-| `/setup` | Agent installation panel |
-| `/menu` | Main menu |
-
----
-
-## Architecture
-
-```
-tg_agent.py       Telegram polling, command handlers, async queue
-agents.py         Subprocess wrappers (CLI agents) + HTTP clients (API agents)
-router.py         Complexity classifier — Haiku vs Sonnet selection
-context.py        Session IDs, shared context, global memory
-team_mode.py      Planner→Coder→Debugger pipeline
-config.py         Constants, binary discovery, timeouts, limits
-rate_tracker.py   Quota tracking: Gemini (1500 RPD), Qwen (1000 RPD)
-db_manager.py     SQLite persistence
-ui.py             Telegram UI: keyboards, menus, file upload
-voice.py          Whisper voice transcription (OGG → text)
-monitor.py        Real-time console dashboard
-```
-
-### State: `~/.local/share/pyChatALL/`
-
-| Path | Contents |
-|------|----------|
-| `token.txt` | Bot token (gitignored) |
-| `pychatall.db` | SQLite: sessions, models, memory, settings |
-| `shared_context.json` | Last 6 messages injected into every prompt |
-| `global_memory.json` | Long-term facts |
-| `workspaces/{agent}/` | Isolated CWD per agent — no bot files visible |
-
-### Agent isolation
-
-Each agent runs in its own empty workspace directory (`workspaces/claude/`, `workspaces/gemini/`, etc.). The agent never sees the bot's source code, preventing unnecessary file scanning and API quota waste. When a Team Mode project is active, the agent uses the project directory instead.
-
----
-
-## License
+## 📄 Лицензия
 
 MIT
