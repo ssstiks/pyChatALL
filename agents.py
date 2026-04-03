@@ -280,6 +280,7 @@ def _gemini_fallback_retry(binary: str, session_file: str, ctx_file: str,
 
 # ── SUBPROCESS HELPER ────────────────────────────────────────
 _active_proc: "subprocess.Popen | None" = None
+_active_proc_lock = threading.Lock()
 
 
 def _kill_proc_tree(proc: "subprocess.Popen") -> None:
@@ -300,11 +301,13 @@ def _kill_proc_tree(proc: "subprocess.Popen") -> None:
 
 
 def cancel_active_proc() -> None:
-    """Kill the currently running subprocess and its children. Thread-safe under CPython GIL."""
+    """Kill the currently running subprocess and its children. Thread-safe."""
     global _active_proc
-    if _active_proc is not None and _active_proc.poll() is None:
-        _kill_proc_tree(_active_proc)
-    _active_proc = None
+    with _active_proc_lock:
+        proc = _active_proc
+        _active_proc = None
+    if proc is not None and proc.poll() is None:
+        _kill_proc_tree(proc)
 
 
 def _run_subprocess(cmd: list, timeout: int, cwd: str, env: dict,
@@ -325,7 +328,8 @@ def _run_subprocess(cmd: list, timeout: int, cwd: str, env: dict,
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             stdin=subprocess.DEVNULL,
                             text=True, cwd=cwd, env=env, start_new_session=True)
-    _active_proc = proc
+    with _active_proc_lock:
+        _active_proc = proc
 
     if stderr_watcher or stdout_cb:
         stderr_lines: list[str] = []
@@ -372,7 +376,9 @@ def _run_subprocess(cmd: list, timeout: int, cwd: str, env: dict,
             _kill_proc_tree(proc)
             return "", "".join(stderr_lines), -1, True
         finally:
-            _active_proc = None
+            with _active_proc_lock:
+                if _active_proc is proc:
+                    _active_proc = None
     else:
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
@@ -385,7 +391,9 @@ def _run_subprocess(cmd: list, timeout: int, cwd: str, env: dict,
                 stdout, stderr = "", ""
             return stdout, stderr, -1, True
         finally:
-            _active_proc = None
+            with _active_proc_lock:
+                if _active_proc is proc:
+                    _active_proc = None
 
 
 _NON_RETRYABLE_MARKERS = (
@@ -571,23 +579,16 @@ def _run_cli(binary: str, session_file: str, ctx_file: str,
         # --- SAFE RATE LIMIT TRACKING ---
         import rate_tracker
         if is_claude and rc == 0:
-            rate_tracker.log_request(agent_key) # Локальный счетчик (эвристика)
+            rate_tracker.log_request(agent_key)  # Локальный счетчик (эвристика)
+            # Passive parse of "X messages remaining until Y" from Claude CLI stdout
+            try:
+                rate_tracker.parse_cli_warning("claude", stdout + stderr)
+            except Exception as e:
+                log_error("Rate limit parsing failed", e)
         if agent_key == "gemini":
             rate_tracker.log_request("gemini")  # Трекинг Gemini RPD
         if agent_key == "qwen":
             rate_tracker.log_request("qwen")    # Трекинг Qwen RPD
-
-            # Пассивный парсинг системных сообщений из stdout/stderr
-            combined_output = stdout + stderr
-            try:
-                rate_tracker.parse_cli_warning(agent_key, combined_output)
-            except Exception as e:
-                # Отправляем ошибку парсинга в базу знаний (Knowledge Base)
-                from db_manager import Database
-                from config import DB_PATH
-                db = Database(DB_PATH)
-                db.add_lesson("claude_cli_parsing", f"Regex failed on output", f"Error: {e}\nOutput: {combined_output[:200]}")
-                log_error("Rate limit parsing failed", e)
         # --------------------------------
 
         # Only check for rate limits on error responses (rc != 0) and only in
@@ -654,9 +655,8 @@ def _run_passthrough(binary: str, session_file: str, agent_name: str, cmd: str) 
 
     command = [binary]
     if is_claude:
-        command += ["--print", "--dangerously-skip-permissions"]
-    command += ["--output-format", "json"]
-    if not is_claude:
+        command += ["--print", "--dangerously-skip-permissions", "--output-format", "json"]
+    else:
         command += ["--yolo"]
     if model:
         command += ["--model", model]
