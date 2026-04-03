@@ -46,7 +46,12 @@ _or_id_map: dict[str, str] = {}
 _CLI_MODELS_CACHE: dict[str, tuple[list[str], float]] = {}
 _CLI_MODELS_TTL = 300  # 5 min
 
-_NVM_BIN = "/home/stx/.nvm/versions/node/v22.20.0/lib/node_modules"
+from config import _NVM as _NVM_BIN_DIR
+# _NVM_BIN_DIR is ".../node/vX.Y.Z/bin"; node_modules lives one level up in lib/
+_NVM_BIN = (
+    os.path.join(os.path.dirname(_NVM_BIN_DIR), "lib", "node_modules")
+    if _NVM_BIN_DIR else ""
+)
 _GEMINI_MODELS_JS = (
     f"{_NVM_BIN}/@google/gemini-cli/node_modules"
     "/@google/gemini-cli-core/dist/src/config/models.js"

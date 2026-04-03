@@ -245,16 +245,19 @@ def shared_ctx_load() -> list:
 
 
 def shared_ctx_save(log_list: list) -> None:
-    """Save shared context messages to database.
-    This function clears old messages and saves new ones.
-    """
-    try:
-        # Since we're replacing the entire context, we could clear and re-add,
-        # but for now we'll just ensure the messages are in the database
-        # For efficiency, this is called after adding individual messages
-        pass
-    except Exception:
-        pass
+    """Legacy no-op kept for import compatibility."""
+    pass
+
+
+def shared_ctx_clear() -> None:
+    """Delete all shared context messages from the database."""
+    with _lock:
+        try:
+            with db.get_connection() as conn:
+                conn.execute("DELETE FROM messages")
+            _last_saved.clear()
+        except Exception as e:
+            log_error(f"Failed to clear messages: {e}")
 
 
 _NOISE_PATTERNS = re.compile(
@@ -621,11 +624,13 @@ def discuss_get_agents() -> list[str]:
 
 
 def discuss_set_agents(agents: list[str]) -> None:
+    os.makedirs(STATE_DIR, exist_ok=True)
     with open(DISCUSS_FILE, "w") as f:
         json.dump(agents, f)
 
 
 def discuss_await_set() -> None:
+    os.makedirs(STATE_DIR, exist_ok=True)
     with open(DISCUSS_AWAIT_FILE, "w") as f:
         f.write("1")
 

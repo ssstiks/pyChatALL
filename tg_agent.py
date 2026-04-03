@@ -55,7 +55,7 @@ from logger import (
 from context import (
     get_model, set_model, agent_label, ctx_pct, cmd_model,
     get_active, set_active,
-    shared_ctx_load, shared_ctx_save, shared_ctx_add,
+    shared_ctx_load, shared_ctx_save, shared_ctx_add, shared_ctx_clear,
     shared_ctx_for_prompt, shared_ctx_for_api,
     _load_session, _save_session, _get_ctx, _add_ctx, _reset_session,
     claude_rate_set, claude_rate_until, claude_rate_msg, _detect_rate_limit,
@@ -328,8 +328,7 @@ def cmd_reset(arg: str) -> str:
         if ll:
             with open(f"{ARCHIVE_DIR}/shared_{ts}.json", "w") as f:
                 json.dump(ll, f, ensure_ascii=False)
-        if os.path.exists(f"{STATE_DIR}/shared_context.json"):
-            os.remove(f"{STATE_DIR}/shared_context.json")
+        shared_ctx_clear()
         return "✅ Все сессии сброшены."
     if agent not in AGENT_NAMES:
         return f"⚠️ Неизвестно: {arg}. Используй: claude/gemini/qwen/openrouter/ollama/all"
