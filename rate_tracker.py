@@ -173,11 +173,12 @@ def get_all_status() -> str:
             lines.append(f"  _Введено {age_h:.1f}ч назад_")
         else:
             est = get_safe_estimate(agent)
-            icon = "🟢" if est["pct"] >= 40 else ("🟡" if est["pct"] >= 10 else "🔴")
-            lines.append("⚠️ *Безопасная оценка (эвристика):*")
-            lines.append(f"  • 5ч: {est['5h_count']}/{est['5h_limit']}")
-            lines.append(f"  • Неделя: {est['week_count']}/{est['week_limit']}")
-            lines.append(f"  • {icon} ~{est['pct']}% (минимум из двух)")
+            lines.append("❓ *Реальный остаток неизвестен*")
+            lines.append(f"  • Через бот за 5ч: {est['5h_count']} запр.")
+            lines.append(f"  • Через бот за неделю: {est['week_count']} запр.")
+            lines.append("  _Это только запросы через бота — не отражает реальный лимит._")
+            lines.append("  Введи % вручную с [claude.ai/usage](https://claude.ai/usage):")
+            lines.append("  `/limit claude 65 week`")
 
     # OpenRouter — из headers (если есть свежие)
     with _lock:
@@ -285,13 +286,9 @@ def get_display(agent: str) -> str:
         icon = "🔴" if pct < 10 else ("🟡" if pct < 40 else "🟢")
         return f"{icon} {pct}% {dim.upper()}"
 
-    # 4. Heuristic estimate (Claude only)
-    if agent == "claude":
-        est = get_safe_estimate(agent)
-        pct = est["pct"]
-        if est["5h_count"] > 0 or est["week_count"] > 0:
-            icon = "🔴" if pct < 10 else ("🟡" if pct < 40 else "🟢")
-            return f"{icon} ~{pct}%"
+    # 4. Claude: heuristic is NOT shown in the agent label — it only counts
+    #    requests through this bot and gives a false sense of remaining quota.
+    #    Real data comes from CLI parsing or /limit manual entry (cases 1 & 2).
 
     # 5. Gemini RPD tracking — always show (even 0 prompts) so agent_label()
     #    never falls back to the misleading ctx_pct() indicator
