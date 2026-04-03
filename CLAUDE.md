@@ -100,6 +100,30 @@ Set in `agents.py`: `_get_agent_workspace(agent_key)`.
 - `WORKSPACES_DIR` — `~/.local/share/pyChatALL/workspaces/`
 - Binary paths auto-detected: `shutil.which()` → `~/.local/bin` → nvm
 
+## Claude usage sync workflow
+
+When the user runs `/config` in this Claude Code session, the Usage block shows:
+- "Current session: X% used, Resets in Y"
+- "Current week: Z% used, Resets on ..."
+
+Extract X and Z, then update the Telegram bot rate_tracker immediately:
+
+```bash
+python3 -c "
+import sys; sys.path.insert(0, '.')
+import rate_tracker
+s_rem = max(0, 100 - <SESSION_PCT_USED>)
+w_rem = max(0, 100 - <WEEK_PCT_USED>)
+pct = min(s_rem, w_rem)
+label = '5h' if s_rem <= w_rem else 'week'
+rate_tracker.set_manual('claude', pct, label)
+print(f'Stored: {pct}% remaining ({label})')
+"
+```
+
+Run this from `/home/stx/Applications/progect/pychatcheck/pyChatALL_final/`.
+The bot will then show the correct remaining % in the Claude agent label.
+
 ## Known issues / gotchas
 
 - **Gemini proxy**: `HTTP_PROXY` from `start.sh` must be stripped for Gemini subprocess or it times out in ~12s. Already handled in `agents.py`.

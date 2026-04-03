@@ -955,6 +955,34 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
         tg_send(_rt.get_agent_stats(agent))
         return
 
+    # /usage <session%_used> <week%_used>
+    # Numbers taken directly from /config → Usage block (% used, not remaining).
+    # Stores the more restrictive of the two as the manual Claude rate entry.
+    if text.startswith("/usage"):
+        parts = text.split()
+        if len(parts) == 3:
+            try:
+                s_used = int(parts[1].rstrip("%"))
+                w_used = int(parts[2].rstrip("%"))
+                s_rem = max(0, 100 - s_used)
+                w_rem = max(0, 100 - w_used)
+                pct = min(s_rem, w_rem)
+                label = "5h" if s_rem <= w_rem else "week"
+                import rate_tracker as _rt
+                _rt.set_manual("claude", pct, label)
+                icon = "🔴" if pct < 10 else ("🟡" if pct < 40 else "🟢")
+                tg_send(
+                    f"✅ *Claude usage обновлён*\n"
+                    f"  • Сессия: {s_used}% использовано → {s_rem}% осталось\n"
+                    f"  • Неделя: {w_used}% использовано → {w_rem}% осталось\n"
+                    f"  • Показывается: {icon} {pct}% ({label})"
+                )
+            except ValueError:
+                tg_send("❌ Формат: `/usage 45 62`\n_(45 = session% used, 62 = week% used из /config)_")
+        else:
+            tg_send("Формат: `/usage <session%_used> <week%_used>`\nЧисла из /config → Usage")
+        return
+
     if text.startswith("/limit"):
         import rate_tracker
         parts = text.split(maxsplit=3)
