@@ -1129,12 +1129,14 @@ def ollama_pull_model(model: str, send_fn, edit_fn) -> bool:
             import socket as _sock
             try:
                 s = _sock.create_connection(("127.0.0.1", 2080), timeout=0.5)
-                s.close()
-                proxy_url = "socks5://127.0.0.1:2080"
-                pull_env["HTTPS_PROXY"] = proxy_url
-                pull_env["HTTP_PROXY"]  = proxy_url
-                pull_env["ALL_PROXY"]   = proxy_url
-                log_info(f"[ollama pull] using proxy {proxy_url}")
+                try:
+                    proxy_url = "socks5://127.0.0.1:2080"
+                    pull_env["HTTPS_PROXY"] = proxy_url
+                    pull_env["HTTP_PROXY"]  = proxy_url
+                    pull_env["ALL_PROXY"]   = proxy_url
+                    log_info(f"[ollama pull] using proxy {proxy_url}")
+                finally:
+                    s.close()
             except OSError:
                 pull_env.pop("HTTPS_PROXY", None)
                 pull_env.pop("HTTP_PROXY",  None)
@@ -1173,6 +1175,7 @@ def ollama_pull_model(model: str, send_fn, edit_fn) -> bool:
                     pass
 
             stderr_out = proc.stderr.read().decode("utf-8", errors="replace").strip()
+            proc.stderr.close()
             rc = proc.returncode
 
             # Verify via ollama list rather than trusting return code alone

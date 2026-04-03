@@ -483,11 +483,17 @@ def claude_rate_until() -> float | None:
     try:
         until_str = db.get_setting('claude_rate_until')
         if until_str:
-            until = float(until_str)
+            try:
+                until = float(until_str)
+            except (ValueError, TypeError):
+                return None
             if until > time.time():
                 return until
-            db.set_setting('claude_rate_until', None)
-    except (ValueError, TypeError):
+            try:
+                db.set_setting('claude_rate_until', None)
+            except Exception as e:
+                log_error(f"Failed to clear claude rate limit: {e}")
+    except Exception:
         pass
     return None
 

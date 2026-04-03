@@ -812,7 +812,8 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
             tg_edit(mid, f"❌ Папка не существует:\n`{new_path}`\n\nПроверь путь и попробуй снова.")
         else:
             from config import _WORK_DIR_FILE
-            open(_WORK_DIR_FILE, "w").write(new_path)
+            with open(_WORK_DIR_FILE, "w") as _f:
+                _f.write(new_path)
             tg_edit(mid,
                 f"✅ Workspace сохранён:\n`{new_path}`\n\n"
                 "Изменение вступит в силу после перезапуска бота.\n"
