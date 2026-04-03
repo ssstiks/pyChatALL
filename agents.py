@@ -234,7 +234,7 @@ def _gemini_fallback_retry(binary: str, session_file: str, ctx_file: str,
         tg_send(f"⚠️ Gemini [{current_model}] недоступен — пробую {fallback}...")
         log_warn(f"Gemini error for {current_model}, trying fallback: {fallback}")
 
-        cmd = [binary, "--output-format", "json", "--yolo", "--model", fallback]
+        cmd = [binary, "--yolo", "--model", fallback]
         sid = _load_session(session_file)
         if sid:
             cmd += ["--resume", sid]
@@ -537,12 +537,10 @@ def _run_cli(binary: str, session_file: str, ctx_file: str,
                 except (json.JSONDecodeError, KeyError):
                     pass
 
-        # For Gemini: watch stderr live so we can notify the user immediately
-        # if Google returns 429 — the CLI will keep retrying internally for
-        # minutes, but the user can switch agents right away.
+        # For Gemini: watch stderr live — on 429 kill immediately and fall
+        # through to _gemini_fallback_retry instead of waiting the full timeout.
+        _quota_notified = threading.Event()
         if agent_key == "gemini":
-            _quota_notified = threading.Event()
-
             def _gemini_stderr_watcher(line: str) -> None:
                 if _quota_notified.is_set():
                     return
@@ -550,11 +548,11 @@ def _run_cli(binary: str, session_file: str, ctx_file: str,
                     _quota_notified.set()
                     from ui import tg_send as _tg
                     _tg(
-                        "⚠️ Gemini: Google вернул 429 (квота).\n"
-                        "CLI автоматически повторяет запрос — подожди, или переключись прямо сейчас:\n"
-                        "/claude  /qwen  /openrouter"
+                        "⚠️ Gemini: Google вернул 429 — переключаюсь на резервную модель...\n"
+                        "Или переключись вручную: /claude  /qwen  /openrouter"
                     )
-                    log_warn("Gemini 429 detected early via stderr watcher")
+                    log_warn("Gemini 429 detected — killing process for immediate fallback")
+                    cancel_active_proc()  # kill now, don't wait full timeout
 
             stdout, stderr, rc, timed_out = _run_subprocess(
                 cmd, timeout_secs, _cwd, env, stderr_watcher=_gemini_stderr_watcher
@@ -563,6 +561,13 @@ def _run_cli(binary: str, session_file: str, ctx_file: str,
             stdout, stderr, rc, timed_out = _run_subprocess(
                 cmd, timeout_secs, _cwd, env,
                 stdout_cb=_stdout_line_cb,
+            )
+
+        # 429 detected early → process was killed, go straight to fallback
+        if agent_key == "gemini" and _quota_notified.is_set():
+            return _gemini_fallback_retry(
+                binary, session_file, ctx_file, full_prompt, file_path, timeout_secs, env,
+                cwd=_cwd,
             )
 
         if _is_transient_error(stdout, stderr, rc, timed_out):
