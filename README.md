@@ -1,235 +1,166 @@
-# pyChatALL — Мульти-AI оркестратор через Telegram
+# pyChatALL
 
-## Что это такое?
-
-**pyChatALL** — это персональный Telegram-бот, который объединяет несколько AI-моделей (Claude, Gemini, Qwen, OpenRouter) в единый интерфейс. Работает на локальной машине, общается с AI через CLI-бинарники и API, управляется одним пользователем через Telegram.
+Personal Telegram bot that routes messages to multiple AI agents: **Claude, Gemini, Qwen, OpenRouter, Ollama**. Switch agents on the fly, run them in parallel, or chain them in a Planner→Coder→Debugger pipeline.
 
 ---
 
-## Архитектура (файлы)
+## Features
 
-| Файл | Роль |
-|------|------|
-| `tg_agent.py` | Точка входа. Telegram-бот, обработка команд, очередь запросов |
-| `agents.py` | Обёртки над AI: запуск subprocess, парсинг JSON, fallback |
-| `router.py` | Умный выбор модели (Haiku vs Sonnet) по сложности задачи |
-| `context.py` | Управление сессиями, общим контекстом, памятью |
-| `team_mode.py` | Командный режим: Planner → Coder → Debugger конвейер |
-| `ui.py` | Telegram UI: клавиатуры, inline-меню, форматирование |
-| `config.py` | Константы: токены, пути, таймауты, лимиты |
-| `logger.py` | Файловое логирование с ротацией |
-| `monitor.py` | Консольный монитор: статистика + хвост логов с цветами |
+- **5 AI backends** — Claude CLI, Gemini CLI, Qwen CLI, OpenRouter API, Ollama (local)
+- **Smart routing** — auto-selects Haiku vs Sonnet based on prompt complexity
+- **Persistent sessions** — CLI agents resume conversations with `--resume <session_id>`
+- **Shared context** — last 6 messages injected into every prompt across all agents
+- **Team Mode** — Planner → Coder → Debugger pipeline with auto-build and auto-commit
+- **Rate tracking** — Gemini (1500 RPD) and Qwen (1000 RPD) quota monitoring
+- **Agent isolation** — each agent runs in its own workspace, never scans the bot's files
+- **Emergency cancel** — `/cancel` kills any stuck process and drains the queue
 
 ---
 
-## Поддерживаемые AI
+## Requirements
 
-| Агент | Модели | Тип подключения |
-|-------|--------|-----------------|
-| **Claude** | Haiku (дешёвый), Sonnet, Opus | CLI subprocess (`claude`) |
-| **Gemini** | auto-gemini-3, 2.5-flash, 2.5-pro | CLI subprocess (`gemini`) |
-| **Qwen** | coder-model, vision-model | CLI subprocess (`qwen`) |
-| **OpenRouter** | 100+ моделей (GPT, Llama, Mistral, DeepSeek...) | HTTP API |
+- Python 3.10+
+- Telegram bot token from [@BotFather](https://t.me/BotFather)
+- Your Telegram user ID (from [@userinfobot](https://t.me/userinfobot))
+- At least one AI CLI installed: `claude`, `gemini`, or `qwen`
 
 ---
 
-## Как работает умная маршрутизация (router.py)
-
-Каждый запрос оценивается: простой → Haiku (дёшево), сложный → Sonnet (мощно).
-
-**Правила (без AI):**
-- Прикреплён файл → Sonnet
-- Есть код в тройных кавычках → Sonnet
-- Промпт > 300 символов → Sonnet
-- Ключевые слова: `implement`, `refactor`, `debug`, `architecture`... → Sonnet
-- Короткий (<80 символов) тривиальный текст → Haiku
-- Неоднозначно → AI-классификатор
-
-**AI-классификатор:** запускает Gemini/Qwen параллельно (таймаут 3 сек), спрашивает "SIMPLE или COMPLEX?". Таймаут → Sonnet.
-
----
-
-## Управление контекстом
-
-### Общий контекст (все агенты)
-- Последние 6 сообщений (~3000 символов) в `shared_context.json`
-- Инжектируется в каждый промпт автоматически
-- Обеспечивает связность диалога между агентами
-
-### Сессии агентов
-- CLI-агенты возвращают `session_id` → сохраняется на диск
-- Следующий запрос: `--resume <session_id>` → продолжение разговора
-- Архивирование при достижении лимита символов:
-
-| Агент | Предупреждение | Архив |
-|-------|---------------|-------|
-| Claude | 80k символов | 200k |
-| Gemini | 500k | 1.5M |
-| Qwen | 100k | 300k |
-| OpenRouter | 60k | 200k |
-
-### Долгосрочная память
-- Факты о пользователе в `memory.md`
-- Команды: `/remember <факт>`, `/memory`, `/forget <что>`
-- Видна всем агентам
-
----
-
-## Команды Telegram-бота
-
-### Вызов агентов
-```
-/claude <промпт>       — спросить Claude
-/gemini <промпт>       — спросить Gemini
-/qwen <промпт>         — спросить Qwen
-/or <промпт>           — спросить OpenRouter
-/all <вопрос>          — спросить всех параллельно
-/discuss <тема>        — последовательное обсуждение (каждый читает ответы предыдущих)
-```
-
-### Управление
-```
-/model [list|имя]      — просмотр/смена модели
-/reset [агент|all]     — сброс сессии
-/ctx                   — показать использование контекста
-/retry                 — повторить последний запрос
-```
-
-### Память и файлы
-```
-/remember <факт>       — сохранить факт
-/memory                — показать память
-/forget <что>          — удалить из памяти
-/files                 — браузер файлов проекта
-/search <запрос>       — веб-поиск (DuckDuckGo)
-/git                   — панель git (status/diff/commit)
-```
-
-### Командный режим
-```
-/team /start <задача>  — запустить командный конвейер
-/team /status          — статус текущего проекта
-/team /list            — список проектов
-/team /review <файлы>  — ревью кода
-```
-
----
-
-## Командный режим (team_mode.py)
-
-Три AI работают как команда разработчиков:
-
-```
-Пользователь: "Сделай Android-приложение для чата"
-         ↓
-    PLANNER (Claude)
-    → создаёт plan.md с архитектурой и шагами
-         ↓
-    CODER (Gemini)
-    → реализует код по плану, пишет отчёт
-         ↓
-    DEBUGGER (Qwen)
-    → ревьюит результат
-         ↓
-    VERDICT: APPROVED?
-    ├─ ДА → auto-commit + build APK → отправить в Telegram
-    └─ ISSUES FOUND → CODER исправляет → снова DEBUGGER
-```
-
-**Настраиваемые параметры:**
-- Назначение ролей (любой агент на любую роль)
-- Пресеты: Android, Web, Python, Solo Gemini
-- Максимум раундов: 3 / 5 / 10 / ∞
-- Авто-сборка APK (gradle/npm/maven)
-- Авто-тесты (pytest/jest/gradle)
-- Авто-коммит при одобрении
-
-**Артефакты:**
-- `plan.md` — план реализации
-- `coder_output.md` — что было сделано
-- `debug_round_N.md` — результаты ревью
-- `project_log.md` — история задач
-- `.apk` / `.ipa` — собранные приложения
-
----
-
-## Устойчивость к ошибкам
-
-### Fallback-цепочка Gemini
-При недоступности модели автоматически пробует:
-`auto-gemini-3` → `2.5-flash-lite` → `2.5-flash` → `2.5-pro` → `3-flash-preview`
-
-### Rate-limit Claude
-- Детектирует исчерпание квоты из stderr
-- Блокирует запросы к Claude до восстановления
-- Уведомляет пользователя в Telegram
-
-### Повтор при временных ошибках
-- HTTP 500/502/503/504, "overloaded" → sleep(2s) → одна повторная попытка
-- Жёсткий отказ: 403, 429, "No capacity" — не повторяет
-
----
-
-## Конкурентность
-
-```
-Главный поток:    Telegram polling
-Рабочий поток:    Очередь запросов (один за раз)
-Фоновые потоки:   Вызовы агентов, обсуждения, командный режим
-```
-
-- Запросы выстраиваются в очередь, не перекрываются
-- Кнопка отмены: `SIGKILL` всей группе процессов
-- `threading.Lock` для файлового состояния
-
----
-
-## Состояние (файлы в /tmp/tg_agent/)
-
-| Файл | Содержимое |
-|------|-----------|
-| `active_agent.txt` | Текущий агент (claude/gemini/qwen/openrouter) |
-| `{агент}_session.txt` | ID сессии CLI-агента |
-| `{агент}_ctx_chars.txt` | Накопленные символы контекста |
-| `{агент}_model.txt` | Выбранная модель |
-| `claude_rate_until.txt` | Unix-timestamp восстановления квоты |
-| `shared_context.json` | Последние 6 сообщений |
-| `memory.md` | Долгосрочные факты |
-| `openrouter_models.json` | Кэш списка моделей (TTL 1ч) |
-| `archive/` | Архивированные сессии |
-| `downloads/` | Скачанные из Telegram файлы |
-
----
-
-## Запуск
+## Installation
 
 ```bash
-# Запуск в фоне
-nohup python3 tg_agent.py >> /tmp/tg_agent.log 2>&1 &
-
-# Мониторинг в реальном времени
-python3 monitor.py
+git clone https://github.com/ssstiks/pyChatALL.git
+cd pyChatALL
+pip install requests
 ```
 
-**PID-lock:** предотвращает дублирование экземпляров, автоматически убивает старый процесс при перезапуске.
+### Configure
+
+```bash
+# Save your bot token
+mkdir -p ~/.local/share/pyChatALL
+echo 'YOUR_BOT_TOKEN' > ~/.local/share/pyChatALL/token.txt
+chmod 600 ~/.local/share/pyChatALL/token.txt
+
+# Set your Telegram user ID (only this user can talk to the bot)
+export TG_ALLOWED_CHAT=123456789
+```
+
+Or use environment variables only:
+```bash
+export TG_BOT_TOKEN=your_token
+export TG_ALLOWED_CHAT=123456789
+```
+
+### Install AI agents (install what you need)
+
+```bash
+# Claude Code CLI
+npm install -g @anthropic-ai/claude-code && claude login
+
+# Gemini CLI
+npm install -g @google/gemini-cli && gemini
+
+# Qwen Code CLI (requires Node.js >= 20)
+npm install -g @qwen-code/qwen-code && qwen
+
+# Ollama (local models, no API key needed)
+curl -fsSL https://ollama.com/install.sh | sh && ollama pull llama3.2
+```
 
 ---
 
-## Зависимости
+## Running
 
-- `requests` — HTTP (OpenRouter, Telegram API, DuckDuckGo)
-- `subprocess` — запуск CLI-агентов
-- Python stdlib: `threading`, `json`, `logging`, `re`, `concurrent.futures`
+```bash
+./start.sh              # start (auto-detects proxy, loads token)
+./start.sh stop         # stop
+./start.sh status       # check if running
+./start.sh logs         # tail live logs
+python3 monitor.py      # real-time console dashboard
+```
 
-Внешние CLI-бинарники:
-- `claude` — Anthropic CLI
-- `gemini` — Google Gemini CLI
-- `qwen` — Alibaba Qwen CLI
+### As a systemd service
+
+```bash
+sudo tee /etc/systemd/system/pychatall.service << EOF
+[Unit]
+Description=pyChatALL Telegram Bot
+After=network-online.target
+
+[Service]
+Type=simple
+User=$USER
+WorkingDirectory=$(pwd)
+Environment="TG_BOT_TOKEN=your_token"
+Environment="TG_ALLOWED_CHAT=123456789"
+ExecStart=$(which python3) $(pwd)/tg_agent.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl enable --now pychatall
+```
 
 ---
 
-## Безопасность
+## Telegram Commands
 
-- Доступ только для одного Telegram-аккаунта (`ALLOWED_CHAT` в config.py)
-- OpenRouter API-ключ хранится в файле, не в env
-- Env-переменные очищаются перед subprocess-вызовами
+| Command | Description |
+|---------|-------------|
+| `/claude` `/gemini` `/qwen` `/openrouter` `/ollama` | Switch active agent |
+| `/all <question>` | Ask all agents in parallel |
+| `/discuss <topic>` | Sequential discussion between agents |
+| `/cancel` | Kill stuck process, drain queue |
+| `/retry` | Repeat last request |
+| `/reset [agent\|all]` | Reset session |
+| `/ctx` | Show context usage |
+| `/model [list\|name]` | View or change model |
+| `/remember <fact>` | Save to long-term memory |
+| `/memory` | Show saved memory |
+| `/files` | File browser |
+| `/git` | Git panel (status/diff/commit) |
+| `/team /new <name>` | Create Team Mode project |
+| `/team /start <task>` | Run Planner→Coder→Debugger pipeline |
+| `/setup` | Agent installation panel |
+| `/menu` | Main menu |
+
+---
+
+## Architecture
+
+```
+tg_agent.py       Telegram polling, command handlers, async queue
+agents.py         Subprocess wrappers (CLI agents) + HTTP clients (API agents)
+router.py         Complexity classifier — Haiku vs Sonnet selection
+context.py        Session IDs, shared context, global memory
+team_mode.py      Planner→Coder→Debugger pipeline
+config.py         Constants, binary discovery, timeouts, limits
+rate_tracker.py   Quota tracking: Gemini (1500 RPD), Qwen (1000 RPD)
+db_manager.py     SQLite persistence
+ui.py             Telegram UI: keyboards, menus, file upload
+voice.py          Whisper voice transcription (OGG → text)
+monitor.py        Real-time console dashboard
+```
+
+### State: `~/.local/share/pyChatALL/`
+
+| Path | Contents |
+|------|----------|
+| `token.txt` | Bot token (gitignored) |
+| `pychatall.db` | SQLite: sessions, models, memory, settings |
+| `shared_context.json` | Last 6 messages injected into every prompt |
+| `global_memory.json` | Long-term facts |
+| `workspaces/{agent}/` | Isolated CWD per agent — no bot files visible |
+
+### Agent isolation
+
+Each agent runs in its own empty workspace directory (`workspaces/claude/`, `workspaces/gemini/`, etc.). The agent never sees the bot's source code, preventing unnecessary file scanning and API quota waste. When a Team Mode project is active, the agent uses the project directory instead.
+
+---
+
+## License
+
+MIT
