@@ -25,7 +25,9 @@
 | **Командный режим** | Planner → Coder → Debugger с авто-коммитом и авто-сборкой |
 | **Голосовые сообщения** | Транскрипция через Whisper прямо в боте |
 | **Долгосрочная память** | Бот помнит факты между сессиями (`/remember`) |
-| **Мониторинг квот** | Gemini 1500 RPD, Qwen 1000 RPD — предупреждает до исчерпания |
+| **Граф знаний (LightRAG)** | Семантический поиск по истории разговоров — релевантный контекст в каждом запросе |
+| **Точный мониторинг квот** | `/stats` — остаток лимитов для каждого агента: Claude сообщения, Gemini/Qwen RPD |
+| **Быстрый фоллбэк Gemini** | При 429-ошибке — мгновенная смена модели без ожидания таймаута |
 | **Экстренная отмена** | `/cancel` — убивает зависший процесс, очищает очередь |
 | **Изоляция агентов** | Каждый агент в своей папке, не сканирует лишние файлы |
 
@@ -50,7 +52,11 @@ mkdir -p ~/.local/share/pyChatALL
 echo 'ВАШ_ТОКЕН' > ~/.local/share/pyChatALL/token.txt
 chmod 600 ~/.local/share/pyChatALL/token.txt
 
-export TG_ALLOWED_CHAT=123456789   # ваш Telegram ID
+# Вариант 1: через переменную окружения
+export TG_ALLOWED_CHAT=123456789
+
+# Вариант 2: через файл (start.sh подхватит автоматически)
+echo '123456789' > ~/.local/share/pyChatALL/allowed_chat.txt
 ```
 
 ### 3. Установи нужные AI-агенты
@@ -69,11 +75,25 @@ npm install -g @qwen-code/qwen-code && qwen
 curl -fsSL https://ollama.com/install.sh | sh && ollama pull llama3.2
 ```
 
-### 4. Запусти бота
+### 4. (Опционально) LightRAG — граф знаний
+
+LightRAG добавляет семантическую память: факты из разговоров сохраняются в граф-векторное хранилище и автоматически подставляются в контекст при следующих запросах.
+
+```bash
+pip install lightrag-hku sentence-transformers
+
+# Нужна Ollama с любой моделью для построения графа
+ollama pull minimax-m2.7:cloud   # или любая другая
+```
+
+> Без LightRAG бот работает в штатном режиме — модуль подключается как опциональный компонент.
+
+### 5. Запусти бота
 
 ```bash
 ./start.sh          # запуск в фоне
 ./start.sh stop     # остановить
+./start.sh status   # проверить PID
 ./start.sh logs     # логи в реальном времени
 python3 monitor.py  # консольный дашборд
 ```
@@ -112,6 +132,19 @@ python3 monitor.py  # консольный дашборд
 /search <запрос>      — веб-поиск
 ```
 
+### Мониторинг квот
+```
+/stats                — лимиты текущего агента
+                        Claude: остаток сообщений из CLI + эвристика
+                        Gemini: промпты сегодня / RPM / сброс в 10:00 МСК
+                        Qwen:   промпты сегодня / сброс в 03:00 МСК
+                        OpenRouter: RPM/TPM из заголовков ответов
+                        Ollama: список установленных моделей
+
+/limit claude 85 5h   — ввести вручную % остатка (с claude.ai/usage)
+/limit reset claude   — сбросить
+```
+
 ### Team Mode — командный конвейер
 ```
 /team /new <имя>      — создать проект
@@ -130,44 +163,90 @@ python3 monitor.py  # консольный дашборд
        ▼
  tg_agent.py ──► asyncio.Queue (один запрос за раз)
        │
-       ├── router.py     выбор модели (Haiku / Sonnet)
-       ├── context.py    +память, +последние 6 сообщений
+       ├── router.py          выбор модели (Haiku / Sonnet)
+       ├── context.py         +LightRAG-контекст, +память, +последние 6 сообщений
        │
        ▼
  agents.py
   ├── Claude CLI subprocess
-  ├── Gemini CLI subprocess   (изолированный CWD, без прокси)
+  ├── Gemini CLI subprocess   (изолированный CWD, без прокси, авто-фоллбэк на 429)
   ├── Qwen CLI subprocess
   ├── OpenRouter HTTP API
   └── Ollama HTTP API
        │
        ▼
   Ответ в Telegram (стриминг)
+       │
+       ▼
+ memory_manager.py  ── Shadow Librarian: извлекает факты → global_memory.json
+                    └── lightrag_manager.py: вставляет резюме в граф знаний
 ```
+
+### LightRAG — как работает граф знаний
+
+```
+Каждое сообщение
+       │
+       ▼
+ memory_manager.py  извлекает короткое резюме разговора
+       │
+       ▼
+ lightrag_manager.rag_insert_background()
+       │  (фоновый поток, не блокирует бота)
+       ▼
+ LightRAG (NetworkX граф + NanoVectorDB)
+   хранится в ~/.local/share/pyChatALL/lightrag/
+
+При следующем запросе:
+ context.py → rag_query(первые 400 символов промпта)
+            → блок [RELEVANT_MEMORY: ...] добавляется в контекст
+```
+
+**Компоненты:**
+- Embeddings: `paraphrase-multilingual-MiniLM-L12-v2` (384-dim, поддерживает русский)
+- LLM для построения графа: любая модель Ollama (задаётся в `lightrag_manager.py`)
+- Один выделенный asyncio-loop в daemon-потоке — все LightRAG-операции идут через него
+
+### Мониторинг квот — как считаются лимиты
+
+| Агент | Источник данных | Метод |
+|-------|----------------|-------|
+| Claude | CLI-вывод `"X messages remaining"` | Парсинг в реальном времени |
+| Claude | SQLite `usage_log` | Эвристика: 45 сообщений / 5ч, 400 / неделю |
+| Gemini | SQLite `usage_log` | RPD-счётчик, сброс в 10:00 МСК |
+| Qwen | SQLite `usage_log` | RPD-счётчик, сброс в 03:00 МСК |
+| OpenRouter | HTTP-заголовки | `x-ratelimit-remaining-*` |
+| Ollama | Ollama API | `/api/tags` — список моделей |
+
+Запросы логируются только при успешном завершении (`rc == 0`). Фоллбэк-ответы Gemini тоже учитываются.
 
 ### Структура файлов
 
 ```
-tg_agent.py      Точка входа, polling, команды, очередь
-agents.py        CLI subprocess + HTTP клиенты, изоляция CWD
-router.py        Классификатор сложности (Haiku vs Sonnet)
-context.py       Сессии, общий контекст, память, модели
-team_mode.py     Командный конвейер Planner→Coder→Debugger
-config.py        Все константы, пути, таймауты, лимиты
-rate_tracker.py  Мониторинг квот Gemini и Qwen
-db_manager.py    SQLite: сессии, модели, память, настройки
-ui.py            Telegram UI: клавиатуры, меню, файлы
-voice.py         Транскрипция голоса (Whisper)
-monitor.py       Консольный дашборд
+tg_agent.py         Точка входа, polling, команды, очередь
+agents.py           CLI subprocess + HTTP клиенты, изоляция CWD
+router.py           Классификатор сложности (Haiku vs Sonnet)
+context.py          Сессии, общий контекст, LightRAG-запросы, модели
+team_mode.py        Командный конвейер Planner→Coder→Debugger
+config.py           Все константы, пути, таймауты, лимиты
+rate_tracker.py     Мониторинг квот: Claude эвристика, Gemini/Qwen RPD
+lightrag_manager.py Граф знаний: вставка и поиск через LightRAG
+db_manager.py       SQLite: сессии, модели, память, настройки, usage_log
+memory_manager.py   Shadow Librarian — извлечение фактов + фид в LightRAG
+ui.py               Telegram UI: клавиатуры, меню, файлы
+voice.py            Транскрипция голоса (Whisper)
+monitor.py          Консольный дашборд
 ```
 
 ### Хранилище: `~/.local/share/pyChatALL/`
 
 ```
 token.txt              токен бота (не коммитится)
-pychatall.db           SQLite база данных
+allowed_chat.txt       Telegram ID владельца (альтернатива TG_ALLOWED_CHAT)
+pychatall.db           SQLite база данных (сессии, usage_log, настройки)
 shared_context.json    последние 6 сообщений (общий контекст)
-global_memory.json     долгосрочная память
+global_memory.json     долгосрочная память (Shadow Librarian)
+lightrag/              граф знаний LightRAG (создаётся автоматически)
 workspaces/claude/     изолированная папка Claude
 workspaces/gemini/     изолированная папка Gemini
 workspaces/qwen/       изолированная папка Qwen
