@@ -267,14 +267,16 @@ def get_all_status() -> str:
             lines.append(f"  • Осталось: *{cli['remaining']}* сообщений")
             lines.append(f"  • Сброс: {cli['reset']}")
             lines.append(f"  _{age}с назад_")
-        elif manual:
-            pct = manual["pct"]
-            lbl = manual["label"]
+        elif manual and "session_rem" in manual:
+            s_rem = manual["session_rem"]
+            w_rem = manual["week_rem"]
             age_h = (time.time() - manual.get("ts", 0)) / 3600
-            icon = "🟢" if pct >= 40 else ("🟡" if pct >= 10 else "🔴")
-            lines.append("🔵 *Ручной ввод:*")
-            lines.append(f"  • {icon} {pct}% ({lbl})")
-            lines.append(f"  _Введено {age_h:.1f}ч назад_")
+            si = "🔴" if s_rem < 10 else ("🟡" if s_rem < 40 else "🟢")
+            wi = "🔴" if w_rem < 10 else ("🟡" if w_rem < 40 else "🟢")
+            lines.append("🔵 *Лимиты Claude Pro (из /config):*")
+            lines.append(f"  {si} Сессия (~5ч): *{s_rem}%* осталось")
+            lines.append(f"  {wi} Неделя:       *{w_rem}%* осталось")
+            lines.append(f"  _Обновлено {age_h:.1f}ч назад_")
         else:
             usage = get_claude_real_usage()
             if usage["ok"]:
@@ -308,12 +310,17 @@ def get_all_status() -> str:
 
 # ── РУЧНОЙ ВВОД (Claude weekly/5h с сайта) ──────────────────────────────────
 
-def set_manual(agent: str, pct: int, label: str = "manual") -> None:
-    """Store manually entered % remaining (from claude.ai/usage)."""
-    pct = max(0, min(100, pct))
+def set_manual(agent: str, session_rem: int, week_rem: int) -> None:
+    """Store % remaining for session (5h) and week, from /config → Usage."""
+    session_rem = max(0, min(100, session_rem))
+    week_rem    = max(0, min(100, week_rem))
     with _lock:
         entry = _state.setdefault(agent, {})
-        entry["manual"] = {"pct": pct, "label": label, "ts": int(time.time())}
+        entry["manual"] = {
+            "session_rem": session_rem,
+            "week_rem":    week_rem,
+            "ts":          int(time.time()),
+        }
         _save_to_db()
 
 
@@ -373,13 +380,14 @@ def get_display(agent: str) -> str:
         icon = "🔴" if rem <= 5 else ("🟡" if rem <= 15 else "🟢")
         return f"{icon} {rem} msg"
 
-    # 2. Manual entry
+    # 2. Manual entry (both session and week)
     manual = s.get("manual")
-    if manual:
-        pct = manual["pct"]
-        lbl = manual["label"]
-        icon = "🔴" if pct < 10 else ("🟡" if pct < 40 else "🔵")
-        return f"{icon} {pct}% {lbl}"
+    if manual and "session_rem" in manual:
+        s_rem = manual["session_rem"]
+        w_rem = manual["week_rem"]
+        si = "🔴" if s_rem < 10 else ("🟡" if s_rem < 40 else "🟢")
+        wi = "🔴" if w_rem < 10 else ("🟡" if w_rem < 40 else "🟢")
+        return f"{si} {s_rem}%·5ч  {wi} {w_rem}%·нед"
 
     # 3. OpenRouter headers (fresh < 2min)
     auto = s.get("auto", {})

@@ -957,13 +957,9 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
             def _do_claude_stats(m=mid):
                 result = _rt.fetch_claude_usage_from_cli()
                 if result["ok"]:
-                    s_used = result["session_used"]
-                    w_used = result["week_used"]
-                    s_rem = max(0, 100 - s_used)
-                    w_rem = max(0, 100 - w_used)
-                    pct = min(s_rem, w_rem)
-                    label = "5h" if s_rem <= w_rem else "week"
-                    _rt.set_manual("claude", pct, label)
+                    s_rem = max(0, 100 - result["session_used"])
+                    w_rem = max(0, 100 - result["week_used"])
+                    _rt.set_manual("claude", s_rem, w_rem)
                 tg_edit(m, _rt.get_agent_stats(agent))
             threading.Thread(target=_do_claude_stats, daemon=True).start()
         else:
@@ -981,16 +977,14 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
                 w_used = int(parts[2].rstrip("%"))
                 s_rem = max(0, 100 - s_used)
                 w_rem = max(0, 100 - w_used)
-                pct = min(s_rem, w_rem)
-                label = "5h" if s_rem <= w_rem else "week"
                 import rate_tracker as _rt
-                _rt.set_manual("claude", pct, label)
-                icon = "🔴" if pct < 10 else ("🟡" if pct < 40 else "🟢")
+                _rt.set_manual("claude", s_rem, w_rem)
+                si = "🔴" if s_rem < 10 else ("🟡" if s_rem < 40 else "🟢")
+                wi = "🔴" if w_rem < 10 else ("🟡" if w_rem < 40 else "🟢")
                 tg_send(
                     f"✅ *Claude usage обновлён*\n"
-                    f"  • Сессия: {s_used}% использовано → {s_rem}% осталось\n"
-                    f"  • Неделя: {w_used}% использовано → {w_rem}% осталось\n"
-                    f"  • Показывается: {icon} {pct}% ({label})"
+                    f"  {si} Сессия: {s_used}% исп → *{s_rem}%* осталось\n"
+                    f"  {wi} Неделя: {w_used}% исп → *{w_rem}%* осталось"
                 )
             except ValueError:
                 tg_send("❌ Формат: `/usage 45 62`\n_(45 = session% used, 62 = week% used из /config)_")
