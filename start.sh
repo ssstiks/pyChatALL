@@ -89,6 +89,13 @@ case "${1:-start}" in
             echo "   Токен загружен из $TOKEN_FILE"
         fi
 
+        # Загружаем Telegram user ID из файла если не задан в окружении
+        CHAT_ID_FILE="$HOME/.local/share/pyChatALL/allowed_chat.txt"
+        if [[ -z "${TG_ALLOWED_CHAT:-}" ]] && [[ -f "$CHAT_ID_FILE" ]]; then
+            TG_ALLOWED_CHAT="$(cat "$CHAT_ID_FILE" | tr -d '[:space:]')"
+            export TG_ALLOWED_CHAT
+        fi
+
         # Проверяем TG_BOT_TOKEN
         if [[ -z "${TG_BOT_TOKEN:-}" ]]; then
             echo "⚠️  Переменная TG_BOT_TOKEN не задана."

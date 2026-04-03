@@ -26,6 +26,10 @@ _GEMINI_RPM_LIMIT   = 18     # RPM порог: при приближении —
 _MSK_OFFSET         = 3 * 3600   # UTC+3
 _GEMINI_RESET_HOUR  = 10         # 10:00 МСК
 
+# ── Claude Pro эвристика ─────────────────────────────────────
+_CLAUDE_LIMIT_5H    = 45     # ~45 сообщений за 5-часовое окно (Claude Pro)
+_CLAUDE_LIMIT_WEEK  = 400    # ~400 сообщений в неделю (Claude Pro)
+
 # ── Qwen квота ────────────────────────────────────────────────
 _QWEN_RPD           = 1000   # суточный лимит
 _QWEN_PROMPT_WARN   = 800
@@ -124,9 +128,9 @@ def get_safe_estimate(agent: str) -> dict:
             cursor.execute("SELECT COUNT(*) FROM usage_log WHERE agent = ? AND timestamp > ?", (agent, one_w))
             count_week = cursor.fetchone()[0]
         
-        lim_5h = 45
-        lim_week = 400
-        
+        lim_5h = _CLAUDE_LIMIT_5H
+        lim_week = _CLAUDE_LIMIT_WEEK
+
         pct_5h = max(0, int((1 - count_5h/lim_5h) * 100))
         pct_week = max(0, int((1 - count_week/lim_week) * 100))
         
@@ -140,7 +144,7 @@ def get_safe_estimate(agent: str) -> dict:
         }
     except Exception as e:
         _logger.warning("get_safe_estimate failed: %s", e)
-        return {"pct": 100, "5h_count": 0, "5h_limit": 45, "week_count": 0, "week_limit": 400}
+        return {"pct": 100, "5h_count": 0, "5h_limit": _CLAUDE_LIMIT_5H, "week_count": 0, "week_limit": _CLAUDE_LIMIT_WEEK}
 
 def get_all_status() -> str:
     """Полный статус для /limits (Markdown-safe)."""

@@ -270,6 +270,8 @@ def _gemini_fallback_retry(binary: str, session_file: str, ctx_file: str,
         set_model("gemini", fallback)
         tg_send(f"✅ Переключился на Gemini [{fallback}]")
         log_info(f"Gemini fallback success: {fallback}, reply={len(reply)}ch")
+        import rate_tracker as _rt
+        _rt.log_request("gemini")  # count successful fallback toward RPD
         return reply or stderr.strip()[:500] or "⚠️ Пустой ответ"
 
     return (
@@ -596,10 +598,10 @@ def _run_cli(binary: str, session_file: str, ctx_file: str,
                 rate_tracker.parse_cli_warning("claude", stdout + stderr)
             except Exception as e:
                 log_error("Rate limit parsing failed", e)
-        if agent_key == "gemini":
-            rate_tracker.log_request("gemini")  # Трекинг Gemini RPD
-        if agent_key == "qwen":
-            rate_tracker.log_request("qwen")    # Трекинг Qwen RPD
+        if agent_key == "gemini" and rc == 0:
+            rate_tracker.log_request("gemini")  # Трекинг Gemini RPD (успешные)
+        if agent_key == "qwen" and rc == 0:
+            rate_tracker.log_request("qwen")    # Трекинг Qwen RPD (успешные)
         # --------------------------------
 
         # Only check for rate limits on error responses (rc != 0) and only in
