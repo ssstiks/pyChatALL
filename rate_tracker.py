@@ -550,6 +550,66 @@ def get_qwen_prompts_today() -> int:
         return 0
 
 
+def fetch_qwen_context_from_cli() -> dict:
+    """
+    Запускает `qwen --yolo` в PTY, выполняет /context,
+    парсит использование контекстного окна.
+    Возвращает {"used_k": float, "total_k": float, "pct": float, "items": [...], "ok": True}
+    или {"ok": False, "error": "..."}.
+    """
+    try:
+        import pexpect as _px, re as _re
+
+        def _clean(t):
+            return _re.sub(r'\x1b\[[0-9;?]*[a-zA-Z]|\x1b[=>]|\r|\x1b\][^\x07]*\x07', '', t)
+
+        child = _px.spawn(
+            "qwen --yolo",
+            encoding="utf-8", timeout=30, echo=False, dimensions=(50, 200)
+        )
+        try:
+            child.expect("YOLO", timeout=20)
+            import time as _t; _t.sleep(2)
+        except Exception:
+            pass
+
+        child.send("\x1b")
+        import time as _t; _t.sleep(0.3)
+        child.send("/context")
+        _t.sleep(0.3)
+        child.send("\r\n")   # отдельно, чтобы не смешать с автодополнением
+        _t.sleep(4)
+
+        out = ""
+        for _ in range(30):
+            try: out += child.read_nonblocking(size=8192, timeout=0.3)
+            except: break
+        child.close(force=True)
+
+        text = _clean(out)
+        # "Контекстное окно: 1000.0k токенов"
+        total_m = _re.search(r'Контекстное окно[:\s]+([0-9.]+)k', text, _re.I)
+        # "Системная подсказка 5.6k токенов (0.6%)" or "Файлы памяти 169 токенов (0.0%)"
+        items_raw = _re.findall(r'([^\n│█]+?)\s+([0-9.]+)(k?)\s+токенов?\s+\(([0-9.]+)%\)', text)
+
+        if not total_m:
+            return {"ok": False, "error": "pattern not found"}
+
+        total_k = float(total_m.group(1))
+        parsed_items = []
+        used_k = 0.0
+        for name, num, k_suffix, pct_s in items_raw:
+            val = float(num)
+            val_k = val if k_suffix == "k" else val / 1000.0
+            used_k += val_k
+            parsed_items.append({"name": name.strip(), "tokens_k": round(val_k, 3), "pct": float(pct_s)})
+
+        pct = round(used_k / total_k * 100, 1) if total_k else 0.0
+        return {"used_k": round(used_k, 2), "total_k": total_k, "pct": pct, "items": parsed_items, "ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 def get_qwen_status() -> str:
     count = get_qwen_prompts_today()
     remaining = max(0, _QWEN_PROMPT_CRIT - count)

@@ -962,6 +962,28 @@ def route_and_reply(text: str, file_path: str | None = None) -> None:
                     _rt.set_manual("claude", s_rem, w_rem)
                 tg_edit(m, _rt.get_agent_stats(agent))
             threading.Thread(target=_do_claude_stats, daemon=True).start()
+        elif agent == "qwen":
+            mid = tg_send("⏳ Читаю /context...")
+            def _do_qwen_stats(m=mid):
+                ctx = _rt.fetch_qwen_context_from_cli()
+                base = _rt.get_agent_stats("qwen")
+                if ctx["ok"]:
+                    lines = [base, "\n📐 *Контекстное окно (из /context):*"]
+                    lines.append(f"  Модель: 1000k токенов")
+                    lines.append(f"  Занято: *{ctx['used_k']:.1f}k* / {ctx['total_k']:.0f}k  ({ctx['pct']}%)")
+                    for item in ctx["items"]:
+                        lines.append(f"  • {item['name']}: {item['tokens_k']}k ({item['pct']}%)")
+                    tg_edit(m, "\n".join(lines))
+                else:
+                    tg_edit(m, base)
+            threading.Thread(target=_do_qwen_stats, daemon=True).start()
+        elif agent == "gemini":
+            mid = tg_send("⏳ Запрашиваю статистику Gemini...")
+            def _do_gemini_stats(m=mid):
+                base = _rt.get_agent_stats("gemini")
+                base += "\n\n_Детали сессии: запусти `gemini --yolo` и введи `/stats session`_"
+                tg_edit(m, base)
+            threading.Thread(target=_do_gemini_stats, daemon=True).start()
         else:
             tg_send(_rt.get_agent_stats(agent))
         return
